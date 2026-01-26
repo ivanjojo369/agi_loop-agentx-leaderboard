@@ -9,7 +9,7 @@
 #   - Add any required secrets as GitHub Secrets in their fork, referenced via ${SECRET_NAME}
 
 [green_agent]
-agentbeats_id = "<019bdcd0-041c-7d23-a7ef-2470d62afdeb>"
+agentbeats_id = "019bdcd0-041c-7d23-a7ef-2470d62afdeb"
 
 [green_agent.env]
 LOG_LEVEL = "INFO"
