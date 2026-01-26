@@ -4,9 +4,8 @@
 #   - Fill [green_agent].agentbeats_id
 #   - Add any required env vars for the green agent (use ${SECRET_NAME} for secrets)
 #
-# Submitter setup (Purple agents):
-#   - Fill each [[participants]].agentbeats_id with their purple agent UUID (Copy agent ID)
-#   - Add any required secrets as GitHub Secrets in their fork, referenced via ${SECRET_NAME}
+# Participants (Purple agent):
+#   - This file is configured to use the SAME purple agent UUID for both attacker and defender.
 
 [green_agent]
 agentbeats_id = "019bdcd0-041c-7d23-a7ef-2470d62afdeb"
@@ -21,12 +20,12 @@ LOG_LEVEL = "INFO"
 
 [[participants]]
 name = "attacker"
-agentbeats_id = ""  # submitter fills: purple agent UUID (Copy agent ID)
+agentbeats_id = "019bfc07-c82f-7fe2-8302-0ed656298c79"
 env = {}
 
 [[participants]]
 name = "defender"
-agentbeats_id = ""  # submitter fills: purple agent UUID (Copy agent ID)
+agentbeats_id = "019bfc07-c82f-7fe2-8302-0ed656298c79"
 env = {}
 
 [config]
