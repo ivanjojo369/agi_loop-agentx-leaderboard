@@ -1,16 +1,39 @@
+# Leaderboard assessment template for your Green Agent (AegisForge).
+#
+# Maintainer setup (YOU):
+#   - Fill [green_agent].agentbeats_id
+#   - Add any required env vars for the green agent (use ${SECRET_NAME} for secrets)
+#
+# Submitter setup (Purple agents):
+#   - Fill each [[participants]].agentbeats_id with their purple agent UUID (Copy agent ID)
+#   - Add any required secrets as GitHub Secrets in their fork, referenced via ${SECRET_NAME}
+
 [green_agent]
-agentbeats_id = ""
-env = { API_KEY = "${GITHUB_SECRET_NAME}", LOG_LEVEL = "INFO" }
+agentbeats_id = "<PASTE_GREEN_AGENT_UUID>"
+
+[green_agent.env]
+LOG_LEVEL = "INFO"
+# Example secret passthrough (only if your green agent needs it):
+# OPENAI_API_KEY = "${OPENAI_API_KEY}"
+
+# Participant roles expected by the green agent.
+# If your green agent expects a different role schema, rename these accordingly.
 
 [[participants]]
-agentbeats_id = ""
-name = "role_1_name"
+name = "attacker"
+agentbeats_id = ""  # submitter fills: purple agent UUID (Copy agent ID)
 env = {}
 
 [[participants]]
-agentbeats_id = ""
-name = "role_2_name"
+name = "defender"
+agentbeats_id = ""  # submitter fills: purple agent UUID (Copy agent ID)
 env = {}
 
 [config]
-# Add your assessment config here
+# Default assessment parameters sent to the green agent at start.
+# Keep deterministic defaults when possible.
+max_rounds = 15
+seed = 0
+# Optional knobs (uncomment if your green agent supports them):
+# timeout_seconds = 900
+# scenario_set = "security_arena_phase1"
