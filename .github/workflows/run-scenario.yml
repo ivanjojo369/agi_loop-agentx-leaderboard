@@ -53,14 +53,6 @@ jobs:
           docker compose -f docker-compose.yml config | grep -nE '^\s*(image|build):' || true
 
       # If you have a GHCR_TOKEN secret, login BEFORE pull (private images).
-      - name: Login to GHCR (optional)
-        if: ${{ secrets.GHCR_TOKEN != '' }}
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN }}
-
       - name: Pull images
         run: |
           docker compose -f docker-compose.yml pull
