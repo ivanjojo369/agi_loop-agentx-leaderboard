@@ -1,35 +1,27 @@
 name: Run Scenario
 
 on:
-  # Run manually from GitHub UI (Actions -> Run workflow)
   workflow_dispatch:
     inputs:
       scenario_path:
         description: "Path to the scenario TOML"
         required: false
         default: "scenario.toml"
-
-  # Auto-run when scenario.toml or this workflow changes
   push:
     paths:
       - "scenario.toml"
       - ".github/workflows/run-scenario.yml"
 
-concurrency:
-  group: run-scenario-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   run:
     runs-on: ubuntu-latest
-
+    # Run on: manual dispatch, forks, or non-main branches (avoid auto-running on upstream main)
+    if: github.event_name == 'workflow_dispatch' || github.event.repository.fork == true || github.ref != 'refs/heads/main'
     permissions:
       contents: write
       packages: read
-
     env:
-      # workflow_dispatch uses the input; push falls back to scenario.toml
-      SCENARIO_PATH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.scenario_path || 'scenario.toml' }}
+      SCENARIO_PATH: ${{ github.event.inputs.scenario_path || 'scenario.toml' }}
 
     steps:
       - name: Checkout
@@ -40,66 +32,75 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Python dependencies
-        run: pip install tomli tomli-w pyyaml requests
-
-      - name: Ensure jq exists
+      - name: Install Python deps used by helper scripts
         run: |
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y jq
-          fi
+          python -m pip install --upgrade pip
+          pip install tomli tomli-w pyyaml requests
 
-      - name: Check if GHCR_TOKEN is available
-        id: check_ghcr
-        env:
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+      - name: Generate docker-compose.yml from scenario
         run: |
-          if [ -n "$GHCR_TOKEN" ]; then
-            echo "has_token=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_token=false" >> $GITHUB_OUTPUT
-          fi
+          echo "Using scenario: $SCENARIO_PATH"
+          python generate_compose.py --scenario "$SCENARIO_PATH"
 
-      - name: Login to GitHub Container Registry
-        if: steps.check_ghcr.outputs.has_token == 'true'
+      # ✅ Critical debug step:
+      # Prints what images the runner will actually use (and whether it's using `build:`).
+      - name: Show compose images (debug)
+        run: |
+          echo "=== docker-compose.yml (image/build) ==="
+          grep -nE '^\s*(image|build):' docker-compose.yml || true
+          echo ""
+          echo "=== docker compose config (resolved image/build) ==="
+          docker compose -f docker-compose.yml config | grep -nE '^\s*(image|build):' || true
+
+      # If you have a GHCR_TOKEN secret, login BEFORE pull (private images).
+      - name: Login to GHCR (optional)
+        if: ${{ secrets.GHCR_TOKEN != '' }}
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_TOKEN }}
 
-      - name: Generate docker-compose.yml
-        run: python generate_compose.py --scenario "$SCENARIO_PATH"
-
       - name: Pull images
         run: |
-          if ! docker compose pull; then
-            echo ""
-            echo "Error: Failed to pull one or more images."
-            echo "Ensure all images are publicly accessible (or provide GHCR_TOKEN)."
-            exit 1
-          fi
+          docker compose -f docker-compose.yml pull
 
-      - name: Create output/submissions/results directories
-        run: |
-          mkdir -p output submissions results
-          chmod 777 output
-
-      - name: Export secrets as environment variables (.env)
+      - name: Prepare output folders and .env
         env:
           SECRETS_JSON: ${{ toJSON(secrets) }}
         run: |
-          echo "$SECRETS_JSON" | jq -r 'to_entries|map("\(.key)=\(.value)")|.[]' > .env
+          mkdir -p output submissions results
+          chmod 777 output
+          # Write .env without jq (works even if jq is missing)
+          python - <<'PY'
+          import json, os, pathlib
+          secrets = json.loads(os.environ.get("SECRETS_JSON","{}") or "{}")
+          lines = []
+          for k, v in secrets.items():
+            if v is None:
+              v = ""
+            lines.append(f"{k}={v}")
+          pathlib.Path(".env").write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+          PY
 
-      - name: Run assessment
-        run: docker compose up --timestamps --no-color --exit-code-from agentbeats-client --abort-on-container-exit
+      - name: Run assessment (force fresh pull)
+        run: |
+          docker compose -f docker-compose.yml up --pull always --timestamps --no-color --exit-code-from agentbeats-client --abort-on-container-exit
+
+      - name: List output folder (debug)
+        if: always()
+        run: |
+          echo "=== output/ ==="
+          ls -la output || true
 
       - name: Record provenance
-        run: python record_provenance.py --compose docker-compose.yml --output output/provenance.json
+        if: always()
+        run: |
+          python record_provenance.py --compose docker-compose.yml --output output/provenance.json
 
       - name: Generate submission metadata
         id: metadata
+        if: always()
         run: |
           TIMESTAMP=$(date +%Y%m%d-%H%M%S)
           USERNAME=${{ github.repository_owner }}
@@ -107,49 +108,58 @@ jobs:
           echo "unique_name=$UNIQUE_NAME" >> $GITHUB_OUTPUT
           echo "branch_name=submission-${UNIQUE_NAME}" >> $GITHUB_OUTPUT
 
-      - name: Copy artifacts into repo folders
+      - name: Copy files to submission directory
+        if: always()
         run: |
           cp "$SCENARIO_PATH" "submissions/${{ steps.metadata.outputs.unique_name }}.toml"
-          cp "output/results.json" "results/${{ steps.metadata.outputs.unique_name }}.json"
-          cp "output/provenance.json" "submissions/${{ steps.metadata.outputs.unique_name }}.provenance.json"
+          if [ ! -f output/results.json ]; then
+            echo "::error::Missing output/results.json (assessment likely failed before writing results)"
+            exit 1
+          fi
+          cp output/results.json "results/${{ steps.metadata.outputs.unique_name }}.json"
+          if [ -f output/provenance.json ]; then
+            cp output/provenance.json "submissions/${{ steps.metadata.outputs.unique_name }}.provenance.json"
+          else
+            echo "::warning::Missing output/provenance.json"
+          fi
 
-      - name: Determine target repository and default branch
+      - name: Determine target repository
         id: target
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # If this is a fork, target the parent; otherwise target this repo.
-          TARGET_REPO=$(gh api repos/${{ github.repository }} --jq '.parent.full_name // .full_name')
-          DEFAULT_BRANCH=$(gh api repos/$TARGET_REPO --jq '.default_branch')
-          echo "repo=$TARGET_REPO" >> $GITHUB_OUTPUT
-          echo "default_branch=$DEFAULT_BRANCH" >> $GITHUB_OUTPUT
-          echo "Target repository: $TARGET_REPO (default branch: $DEFAULT_BRANCH)"
+          PARENT_REPO=$(gh api repos/${{ github.repository }} --jq '.parent.full_name // "${{ github.repository }}"')
+          echo "Target repository: $PARENT_REPO"
+          echo "repo=$PARENT_REPO" >> $GITHUB_OUTPUT
 
       - name: Create submission branch
+        if: always()
         run: |
-          git remote add upstream "https://github.com/${{ steps.target.outputs.repo }}.git"
+          git remote add upstream https://github.com/${{ steps.target.outputs.repo }}.git || true
           git fetch upstream
-          git checkout -b "${{ steps.metadata.outputs.branch_name }}" "upstream/${{ steps.target.outputs.default_branch }}"
+          git checkout -b ${{ steps.metadata.outputs.branch_name }} upstream/main
 
       - name: Commit results
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add \
-            "submissions/${{ steps.metadata.outputs.unique_name }}.toml" \
-            "submissions/${{ steps.metadata.outputs.unique_name }}.provenance.json" \
-            "results/${{ steps.metadata.outputs.unique_name }}.json"
+          git add "submissions/${{ steps.metadata.outputs.unique_name }}.toml"                   "submissions/${{ steps.metadata.outputs.unique_name }}.provenance.json"                   "results/${{ steps.metadata.outputs.unique_name }}.json" || true
           git commit -m "Submission: ${{ steps.metadata.outputs.unique_name }}
 
-          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          git push origin "${{ steps.metadata.outputs.branch_name }}"
-          echo "::notice title=Submission Branch Created::Branch: ${{ steps.metadata.outputs.branch_name }}"
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" || echo "Nothing to commit"
+          git push origin ${{ steps.metadata.outputs.branch_name }}
+          echo "::notice title=Submission Branch Created::Your results are ready for submission on branch: ${{ steps.metadata.outputs.branch_name }}"
 
       - name: Output PR link
+        if: always()
         run: |
           echo "### Submit your results" >> $GITHUB_STEP_SUMMARY
-          echo "[Open a pull request](https://github.com/${{ steps.target.outputs.repo }}/compare/${{ steps.target.outputs.default_branch }}...${{ github.repository_owner }}:${{ github.event.repository.name }}:${{ steps.metadata.outputs.branch_name }}?expand=1)" >> $GITHUB_STEP_SUMMARY
+          echo "[Click here to open a pull request](https://github.com/${{ steps.target.outputs.repo }}/compare/main...${{ github.repository_owner }}:${{ github.event.repository.name }}:${{ steps.metadata.outputs.branch_name }}?expand=1)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️ When creating the PR, UNCHECK 'Allow edits and access to secrets by maintainers' to protect your secrets." >> $GITHUB_STEP_SUMMARY
 
       - name: Cleanup
         if: always()
-        run: docker compose down -v || true
+        run: |
+          docker compose -f docker-compose.yml down -v || true
