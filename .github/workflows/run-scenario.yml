@@ -1,38 +1,53 @@
 name: Run Scenario
 
-on:
+"on":
+  # Allows maintainers to run the assessment manually from GitHub UI (Actions -> Run workflow)
   workflow_dispatch:
     inputs:
       scenario_path:
         description: "Path to the scenario TOML"
         required: false
         default: "scenario.toml"
+
+  # Auto-runs when scenario.toml or this workflow changes
   push:
     paths:
-      - 'scenario.toml'
-      - '.github/workflows/run-scenario.yml'
+      - "scenario.toml"
+      - ".github/workflows/run-scenario.yml"
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
+    # Run in forks by default; allow manual workflow_dispatch even on main.
     if: github.event_name == 'workflow_dispatch' || github.event.repository.fork == true || github.ref != 'refs/heads/main'
+
     permissions:
       contents: write
       packages: read
+
     env:
-      SCENARIO_PATH: ${{ github.event.inputs.scenario_path || 'scenario.toml' }}
+      # For workflow_dispatch: use input; for push: fallback to scenario.toml
+      SCENARIO_PATH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.scenario_path || 'scenario.toml' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
         run: pip install tomli tomli-w pyyaml requests
+
+      - name: Ensure jq exists
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          fi
 
       - name: Generate docker-compose.yml
         run: python generate_compose.py --scenario "$SCENARIO_PATH"
@@ -49,7 +64,7 @@ jobs:
             exit 1
           fi
 
-      - name: Create output and submission directories
+      - name: Create output/submission directories
         run: |
           mkdir -p output submissions results
           chmod 777 output
@@ -103,11 +118,11 @@ jobs:
       - name: Determine target repository
         id: target
         env:
-            GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-            PARENT_REPO=$(gh api repos/${{ github.repository }} --jq '.parent.full_name // "${{ github.repository }}"')
-            echo "Target repository: $PARENT_REPO"
-            echo "repo=$PARENT_REPO" >> $GITHUB_OUTPUT
+          PARENT_REPO=$(gh api repos/${{ github.repository }} --jq '.parent.full_name // "${{ github.repository }}"')
+          echo "Target repository: $PARENT_REPO"
+          echo "repo=$PARENT_REPO" >> $GITHUB_OUTPUT
 
       - name: Create submission branch
         run: |
