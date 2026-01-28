@@ -1,6 +1,6 @@
 name: Run Scenario
 
-"on":
+on:
   # Allows maintainers to run the assessment manually from GitHub UI (Actions -> Run workflow)
   workflow_dispatch:
     inputs:
