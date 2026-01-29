@@ -94,6 +94,71 @@ jobs:
           pathlib.Path(".env").write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
           PY
 
+      - name: "Preflight: start agents and probe JSON-RPC (debug)"
+        run: |
+          set -euo pipefail
+          SERVICES="$(docker compose -f docker-compose.yml config --services || true)"
+          echo "Services in compose:"
+          echo "$SERVICES"
+
+          up_if_exists () {
+            local svc="$1"
+            if echo "$SERVICES" | grep -qx "$svc"; then
+              echo "Starting $svc ..."
+              docker compose -f docker-compose.yml up -d --pull always --no-build "$svc"
+            else
+              echo "Service $svc not present (skip)."
+            fi
+          }
+
+          # Start agents (not the client) so we can probe what CI sees on the compose network.
+          up_if_exists green-agent
+          up_if_exists attacker
+          up_if_exists defender
+          up_if_exists purple-agent
+
+          echo "===== compose ps (after starting agents) ====="
+          docker compose -f docker-compose.yml ps -a || true
+
+          # Discover the explicit network name (preferred) from the resolved config.
+          NET=""
+          if [ -f /tmp/compose.resolved.yml ]; then
+            NET="$(grep -E '^\s*name:\s+.*_agent-network\s*$' /tmp/compose.resolved.yml | head -n1 | awk '{print $2}' || true)"
+          fi
+          if [ -z "$NET" ]; then
+            NET="$(docker network ls --format '{{.Name}}' | grep '_agent-network$' | head -n1 || true)"
+          fi
+          echo "Using NET=$NET"
+          if [ -z "$NET" ]; then
+            echo "::warning::Could not determine compose network name; skipping probe."
+            exit 0
+          fi
+
+          probe () {
+            local host="$1"
+            echo ""
+            echo "===== PROBE $host:9009 agent-card ====="
+            docker run --rm --network "$NET" curlimages/curl:8.6.0 -sS --max-time 5 \
+              "http://$host:9009/.well-known/agent-card.json" | head -c 2000; echo
+
+            echo "===== PROBE $host:9009 skills.list (raw JSON) ====="
+            docker run --rm --network "$NET" curlimages/curl:8.6.0 -sS --globoff --max-time 8 -X POST \
+              "http://$host:9009/jsonrpc" -H "Content-Type: application/json" \
+              --data-raw '{"jsonrpc":"2.0","id":"p1","method":"skills.list","params":{}}' | head -c 4000; echo
+
+            echo "===== PROBE $host:9009 sendMessage (raw JSON) ====="
+            docker run --rm --network "$NET" curlimages/curl:8.6.0 -sS --globoff --max-time 8 -X POST \
+              "http://$host:9009/jsonrpc" -H "Content-Type: application/json" \
+              --data-raw '{"jsonrpc":"2.0","id":"p2","method":"sendMessage","params":{"Message":{"role":"user","parts":[{"kind":"text","text":"ping"}]}}}' | head -c 4000; echo
+          }
+
+          # Probe all agent services that exist.
+          for svc in green-agent attacker defender purple-agent; do
+            if echo "$SERVICES" | grep -qx "$svc"; then
+              probe "$svc" || echo "::warning::Probe failed for $svc"
+            fi
+          done
+
       - name: Run assessment (NO BUILD, ALWAYS PULL)
         run: |
           set -euo pipefail
@@ -101,10 +166,12 @@ jobs:
           docker compose -f docker-compose.yml up \
             --pull always \
             --no-build \
+            --no-recreate \
             --timestamps \
             --no-color \
             --exit-code-from agentbeats-client \
-            --abort-on-container-exit
+            --abort-on-container-exit \
+            agentbeats-client
 
       # Debug forense SIEMPRE (aunque falle)
       - name: Post-run docker diagnostics (always)
@@ -112,14 +179,14 @@ jobs:
         run: |
           set +e
           echo "===== docker compose ps ====="
-          docker compose -f docker-compose.yml ps || true
+          docker compose -f docker-compose.yml ps -a || true
           echo ""
           echo "===== docker compose images ====="
           docker compose -f docker-compose.yml images || true
           echo ""
           echo "===== container -> Config.Image ====="
           for svc in green-agent purple-agent attacker defender agentbeats-client; do
-            cid="$(docker compose -f docker-compose.yml ps -q "$svc" 2>/dev/null || true)"
+            cid="$(docker compose -f docker-compose.yml ps -a -q "$svc" 2>/dev/null || true)"
             echo "---- $svc : $cid ----"
             if [ -n "$cid" ]; then
               docker inspect "$cid" --format '{{.Name}}  Config.Image={{.Config.Image}}  ImageID={{.Image}}' || true
