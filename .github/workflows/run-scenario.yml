@@ -10,18 +10,25 @@ on:
   push:
     paths:
       - "scenario.toml"
+      - "generate_compose.py"
+      - "record_provenance.py"
       - ".github/workflows/run-scenario.yml"
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    # Run on: manual dispatch, forks, or non-main branches (avoid auto-running on upstream main)
-    if: github.event_name == 'workflow_dispatch' || github.event.repository.fork == true || github.ref != 'refs/heads/main'
+
+    # ⚠️ IMPORTANTE:
+    # No usamos `if:` a nivel de job para evitar que se "skipped" en pushes a main.
     permissions:
       contents: write
       packages: read
+
     env:
+      # Para workflow_dispatch usa el input; para push cae al default.
       SCENARIO_PATH: ${{ github.event.inputs.scenario_path || 'scenario.toml' }}
+      DOCKER_BUILDKIT: "0"
+      COMPOSE_DOCKER_CLI_BUILD: "0"
 
     steps:
       - name: Checkout
@@ -39,61 +46,132 @@ jobs:
 
       - name: Generate docker-compose.yml from scenario
         run: |
+          set -euo pipefail
           echo "Using scenario: $SCENARIO_PATH"
           python generate_compose.py --scenario "$SCENARIO_PATH"
+          echo "Generated docker-compose.yml:"
+          ls -lah docker-compose.yml
 
-      # ✅ Critical debug step:
-      # Prints what images the runner will actually use (and whether it's using `build:`).
+      # ✅ Debug clave: RAW + RESOLVED
       - name: Show compose images (debug)
         run: |
-          echo "=== docker-compose.yml (image/build) ==="
-          grep -nE '^\s*(image|build):' docker-compose.yml || true
+          set -euo pipefail
+          echo "===== RAW docker-compose.yml (first 240 lines) ====="
+          sed -n '1,240p' docker-compose.yml || true
           echo ""
-          echo "=== docker compose config (resolved image/build) ==="
-          docker compose -f docker-compose.yml config | grep -nE '^\s*(image|build):' || true
+          echo "===== RAW (grep image/build + service headers) ====="
+          grep -nE '^\s*(green-agent|purple-agent|attacker|defender|agentbeats-client):|^\s*(image|build|pull_policy):' docker-compose.yml || true
+          echo ""
+          echo "===== docker compose version ====="
+          docker compose version
+          echo ""
+          echo "===== RESOLVED docker compose config ====="
+          docker compose -f docker-compose.yml config > /tmp/compose.resolved.yml
+          sed -n '1,260p' /tmp/compose.resolved.yml || true
+          echo ""
+          echo "===== RESOLVED (only image/build/pull_policy + service headers) ====="
+          grep -nE '^\s*(green-agent|purple-agent|attacker|defender|agentbeats-client):|^\s*(image|build|pull_policy):' /tmp/compose.resolved.yml || true
 
-      # If you have a GHCR_TOKEN secret, login BEFORE pull (private images).
-      - name: Pull images
+      - name: Pull images (explicit)
         run: |
+          set -euo pipefail
           docker compose -f docker-compose.yml pull
 
       - name: Prepare output folders and .env
         env:
           SECRETS_JSON: ${{ toJSON(secrets) }}
         run: |
+          set -euo pipefail
           mkdir -p output submissions results
           chmod 777 output
-          # Write .env without jq (works even if jq is missing)
           python - <<'PY'
           import json, os, pathlib
           secrets = json.loads(os.environ.get("SECRETS_JSON","{}") or "{}")
           lines = []
           for k, v in secrets.items():
-            if v is None:
-              v = ""
+            if v is None: v = ""
             lines.append(f"{k}={v}")
           pathlib.Path(".env").write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
           PY
 
-      - name: Run assessment (force fresh pull)
+      - name: Run assessment (NO BUILD, ALWAYS PULL)
         run: |
-          docker compose -f docker-compose.yml up --pull always --timestamps --no-color --exit-code-from agentbeats-client --abort-on-container-exit
+          set -euo pipefail
+          # `--no-build` evita que compose construya aunque exista `build:` en el YAML.
+          docker compose -f docker-compose.yml up \
+            --pull always \
+            --no-build \
+            --timestamps \
+            --no-color \
+            --exit-code-from agentbeats-client \
+            --abort-on-container-exit
+
+      # Debug forense SIEMPRE (aunque falle)
+      - name: Post-run docker diagnostics (always)
+        if: always()
+        run: |
+          set +e
+          echo "===== docker compose ps ====="
+          docker compose -f docker-compose.yml ps || true
+          echo ""
+          echo "===== docker compose images ====="
+          docker compose -f docker-compose.yml images || true
+          echo ""
+          echo "===== container -> Config.Image ====="
+          for svc in green-agent purple-agent attacker defender agentbeats-client; do
+            cid="$(docker compose -f docker-compose.yml ps -q "$svc" 2>/dev/null || true)"
+            echo "---- $svc : $cid ----"
+            if [ -n "$cid" ]; then
+              docker inspect "$cid" --format '{{.Name}}  Config.Image={{.Config.Image}}  ImageID={{.Image}}' || true
+            fi
+          done
+          echo ""
+          echo "===== logs (last 250 lines) ====="
+          docker compose -f docker-compose.yml logs --no-color --tail=250 || true
 
       - name: List output folder (debug)
         if: always()
         run: |
           echo "=== output/ ==="
           ls -la output || true
+          echo ""
+          echo "=== results.json (if exists) ==="
+          test -f output/results.json && (head -c 2000 output/results.json; echo) || echo "output/results.json not found"
 
       - name: Record provenance
         if: always()
         run: |
-          python record_provenance.py --compose docker-compose.yml --output output/provenance.json
+          python record_provenance.py --compose docker-compose.yml --output output/provenance.json || true
 
-      - name: Generate submission metadata
-        id: metadata
+      # Sube artefactos SIEMPRE para inspeccionar el compose y logs
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-scenario-debug
+          path: |
+            docker-compose.yml
+            /tmp/compose.resolved.yml
+            output/**
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Check if results exist
+        id: check
         if: always()
         run: |
+          if [ -f output/results.json ]; then
+            echo "has_results=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_results=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Solo preparar submission si hay results.json
+      - name: Generate submission metadata
+        id: metadata
+        if: steps.check.outputs.has_results == 'true'
+        run: |
+          set -euo pipefail
           TIMESTAMP=$(date +%Y%m%d-%H%M%S)
           USERNAME=${{ github.repository_owner }}
           UNIQUE_NAME="${USERNAME}-${TIMESTAMP}"
@@ -101,13 +179,10 @@ jobs:
           echo "branch_name=submission-${UNIQUE_NAME}" >> $GITHUB_OUTPUT
 
       - name: Copy files to submission directory
-        if: always()
+        if: steps.check.outputs.has_results == 'true'
         run: |
+          set -euo pipefail
           cp "$SCENARIO_PATH" "submissions/${{ steps.metadata.outputs.unique_name }}.toml"
-          if [ ! -f output/results.json ]; then
-            echo "::error::Missing output/results.json (assessment likely failed before writing results)"
-            exit 1
-          fi
           cp output/results.json "results/${{ steps.metadata.outputs.unique_name }}.json"
           if [ -f output/provenance.json ]; then
             cp output/provenance.json "submissions/${{ steps.metadata.outputs.unique_name }}.provenance.json"
@@ -117,26 +192,32 @@ jobs:
 
       - name: Determine target repository
         id: target
+        if: steps.check.outputs.has_results == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           PARENT_REPO=$(gh api repos/${{ github.repository }} --jq '.parent.full_name // "${{ github.repository }}"')
           echo "Target repository: $PARENT_REPO"
           echo "repo=$PARENT_REPO" >> $GITHUB_OUTPUT
 
       - name: Create submission branch
-        if: always()
+        if: steps.check.outputs.has_results == 'true'
         run: |
+          set -euo pipefail
           git remote add upstream https://github.com/${{ steps.target.outputs.repo }}.git || true
           git fetch upstream
           git checkout -b ${{ steps.metadata.outputs.branch_name }} upstream/main
 
       - name: Commit results
-        if: always()
+        if: steps.check.outputs.has_results == 'true'
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "submissions/${{ steps.metadata.outputs.unique_name }}.toml"                   "submissions/${{ steps.metadata.outputs.unique_name }}.provenance.json"                   "results/${{ steps.metadata.outputs.unique_name }}.json" || true
+          git add "submissions/${{ steps.metadata.outputs.unique_name }}.toml" \
+                  "submissions/${{ steps.metadata.outputs.unique_name }}.provenance.json" \
+                  "results/${{ steps.metadata.outputs.unique_name }}.json" || true
           git commit -m "Submission: ${{ steps.metadata.outputs.unique_name }}
 
           Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" || echo "Nothing to commit"
@@ -144,7 +225,7 @@ jobs:
           echo "::notice title=Submission Branch Created::Your results are ready for submission on branch: ${{ steps.metadata.outputs.branch_name }}"
 
       - name: Output PR link
-        if: always()
+        if: steps.check.outputs.has_results == 'true'
         run: |
           echo "### Submit your results" >> $GITHUB_STEP_SUMMARY
           echo "[Click here to open a pull request](https://github.com/${{ steps.target.outputs.repo }}/compare/main...${{ github.repository_owner }}:${{ github.event.repository.name }}:${{ steps.metadata.outputs.branch_name }}?expand=1)" >> $GITHUB_STEP_SUMMARY
