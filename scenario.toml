@@ -1,4 +1,8 @@
-# Purple/Green scenario for AgentBeats
+# AgentBeats Purple/Green Scenario (Phase 1)
+# IMPORTANT: Do NOT paste API keys here. Use GitHub Actions Secrets instead.
+# - Repo Settings -> Secrets and variables -> Actions -> New repository secret
+#   Name: OPENAI_API_KEY
+# - The workflow writes it into a .env file and injects it into the containers.
 
 [green_agent]
 agentbeats_id = "019bdcd0-041c-7d23-a7ef-2470d62afdeb"
@@ -15,13 +19,13 @@ agentbeats_id = "019c1163-b141-7131-9769-08300b1c1511"
 env = { OPENAI_API_KEY = "${OPENAI_API_KEY}" }
 
 [config]
-# Mantén lo que tu green espera:
+# Which scenario family to run inside your green evaluator
 scenario_set = "security_arena_phase1"
 
-# ✅ Mínimo oficial para que haya tasks:
+# Minimum needed so the runner generates tasks (avoid results: [])
 domain = "security_arena"
 num_tasks = 3
 
-# Tus parámetros:
+# Run controls
 max_rounds = 15
 seed = 1
