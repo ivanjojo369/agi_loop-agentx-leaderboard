@@ -104,7 +104,7 @@ jobs:
           set -euo pipefail
           docker compose -f docker-compose.yml pull
 
-      - name: Preflight: start agent services and probe A2A endpoints (debug)
+      - name: "Preflight: start agent services and probe A2A endpoints (debug)"
         run: |
           set -euo pipefail
           SERVICES="$(docker compose -f docker-compose.yml config --services || true)"
@@ -121,6 +121,7 @@ jobs:
             fi
           }
 
+          # These names cover the common patterns in AgentBeats leaderboard templates.
           up_if_exists green-agent
           up_if_exists attacker
           up_if_exists defender
@@ -129,6 +130,7 @@ jobs:
           echo "===== compose ps (after starting agents) ====="
           docker compose -f docker-compose.yml ps -a || true
 
+          # Determine the compose network name (best-effort).
           NET="$(grep -E '^\s*name:\s+.*_agent-network\s*$' /tmp/compose.resolved.yml 2>/dev/null | head -n1 | awk '{print $2}' || true)"
           if [ -z "$NET" ]; then
             NET="$(docker network ls --format '{{.Name}}' | grep '_agent-network$' | head -n1 || true)"
@@ -241,6 +243,25 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          python - <<'PY'
+          import json, pathlib
+          p = pathlib.Path("output/results.json")
+          out = {"has_results": "false", "results_count": "0"}
+          if p.exists():
+            try:
+              d = json.loads(p.read_text(encoding="utf-8"))
+              r = d.get("results")
+              if isinstance(r, list):
+                out["results_count"] = str(len(r))
+                if len(r) > 0:
+                  out["has_results"] = "true"
+            except Exception:
+              pass
+          for k,v in out.items():
+            print(f"{k}={v}")
+          step_out = pathlib.Path().resolve() / "GITHUB_OUTPUT"
+          # GitHub provides $GITHUB_OUTPUT path, but we keep the print in stdout too.
+          PY
           echo "has_results=$(python - <<'PY'
           import json, pathlib
           p = pathlib.Path("output/results.json")
