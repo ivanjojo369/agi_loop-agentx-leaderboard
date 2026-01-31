@@ -1,25 +1,27 @@
 # Purple/Green scenario for AgentBeats
-# Updated to use distinct AgentBeats agent IDs (green/attacker/defender).
 
 [green_agent]
 agentbeats_id = "019bdcd0-041c-7d23-a7ef-2470d62afdeb"
+env = { OPENAI_API_KEY = "${OPENAI_API_KEY}" }
 
 [[participants]]
 name = "attacker"
 agentbeats_id = "019bfc07-c82f-7fe2-8302-0ed656298c79"
+env = { OPENAI_API_KEY = "${OPENAI_API_KEY}" }
 
 [[participants]]
 name = "defender"
 agentbeats_id = "019c1163-b141-7131-9769-08300b1c1511"
+env = { OPENAI_API_KEY = "${OPENAI_API_KEY}" }
 
 [config]
-# IMPORTANT: this must match what your green evaluator expects.
-# If your green agent uses scenario sets, keep this enabled:
+# Mantén lo que tu green espera:
 scenario_set = "security_arena_phase1"
 
-# Reasonable defaults (tweak as you like)
+# ✅ Mínimo oficial para que haya tasks:
+domain = "security_arena"
+num_tasks = 3
+
+# Tus parámetros:
 max_rounds = 15
 seed = 1
-# If your green agent expects it, you can also add:
-# domain = "security_arena"
-# num_tasks = 1
