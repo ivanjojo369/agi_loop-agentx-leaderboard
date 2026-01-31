@@ -1,0 +1,38 @@
+# Leaderboard assessment template for your Green Agent (AegisForge).
+#
+# Maintainer setup (YOU):
+#   - Fill [green_agent].agentbeats_id
+#   - Add any required env vars for the green agent (use ${SECRET_NAME} for secrets)
+#
+# Participants (Purple agent):
+#   - Use DISTINCT purple agent UUIDs for attacker and defender.
+
+[green_agent]
+agentbeats_id = "019bdcd0-041c-7d23-a7ef-2470d62afdeb"
+
+[green_agent.env]
+LOG_LEVEL = "INFO"
+# Example secret passthrough (only if your green agent needs it):
+# OPENAI_API_KEY = "${OPENAI_API_KEY}"
+
+# Participant roles expected by the green agent.
+# If your green agent expects a different role schema, rename these accordingly.
+
+[[participants]]
+name = "attacker"
+agentbeats_id = "019bfc07-c82f-7fe2-8302-0ed656298c79"
+env = {}
+
+[[participants]]
+name = "defender"
+agentbeats_id = "019c1163-b141-7131-9769-08300b1c1511"
+env = {}
+
+[config]
+# Default assessment parameters sent to the green agent at start.
+# Keep deterministic defaults when possible.
+max_rounds = 15
+seed = 0
+# Optional knobs (uncomment if your green agent supports them):
+# timeout_seconds = 900
+# scenario_set = "security_arena_phase1"

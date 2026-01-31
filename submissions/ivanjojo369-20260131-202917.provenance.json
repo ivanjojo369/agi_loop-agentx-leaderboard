@@ -1,0 +1,18 @@
+{
+  "image_digests": {
+    "green-agent": "ghcr.io/ivanjojo369/agi_loop-agentx@sha256:58c7ff73b7c48cf2b7e4bde2bc400d996de5f1120261a364a11319ad6e5c9347",
+    "attacker": "ghcr.io/ivanjojo369/agi_loop-agentx@sha256:58c7ff73b7c48cf2b7e4bde2bc400d996de5f1120261a364a11319ad6e5c9347",
+    "defender": "ghcr.io/ivanjojo369/agi_loop-agentx@sha256:58c7ff73b7c48cf2b7e4bde2bc400d996de5f1120261a364a11319ad6e5c9347",
+    "agentbeats-client": "ghcr.io/agentbeats/agentbeats-client@sha256:13dfe3ef4e583a80e7ce2fe3becd0ce3b879841368a7f4fa40b6ebbabeeb014e"
+  },
+  "timestamp": "2026-01-31T20:29:16Z",
+  "github_actions": {
+    "run_url": "https://github.com/ivanjojo369/agi_loop-agentx-leaderboard/actions/runs/21535186366",
+    "run_logs_url": "https://api.github.com/repos/ivanjojo369/agi_loop-agentx-leaderboard/actions/runs/21535186366/logs",
+    "ref": "refs/heads/main",
+    "sha": "b060907e7400ddf7072209523777802ca79b8d2f",
+    "repository_url": "https://github.com/ivanjojo369/agi_loop-agentx-leaderboard",
+    "workflow_ref": "ivanjojo369/agi_loop-agentx-leaderboard/.github/workflows/run-scenario.yml@refs/heads/main",
+    "workflow_sha": "b060907e7400ddf7072209523777802ca79b8d2f"
+  }
+}
