@@ -5,7 +5,7 @@
 #   - Add any required env vars for the green agent (use ${SECRET_NAME} for secrets)
 #
 # Participants (Purple agent):
-#   - This file is configured to use the SAME purple agent UUID for both attacker and defender.
+#   - Use DISTINCT purple agent UUIDs for attacker and defender.
 
 [green_agent]
 agentbeats_id = "019bdcd0-041c-7d23-a7ef-2470d62afdeb"
@@ -25,7 +25,7 @@ env = {}
 
 [[participants]]
 name = "defender"
-agentbeats_id = "019bfc07-c82f-7fe2-8302-0ed656298c79"
+agentbeats_id = "019c1163-b141-7131-9769-08300b1c1511"
 env = {}
 
 [config]
