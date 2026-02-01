@@ -211,6 +211,24 @@ jobs:
           set -euo pipefail
           docker compose -f docker-compose.yml pull
 
+
+      - name: "Pre-run: show /app/scenario.toml inside agentbeats-client"
+        run: |
+          set -euo pipefail
+          echo "=== docker compose config (agentbeats-client excerpt) ==="
+          docker compose -f docker-compose.yml config | awk '
+            BEGIN{p=0}
+            /^services:/{p=0}
+            /agentbeats-client:/{p=1}
+            p==1{print}
+          ' | sed -n '1,220p' || true
+
+          echo ""
+          echo "=== /app/scenario.toml inside agentbeats-client ==="
+          docker compose -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc \
+            "set -e; pwd; ls -la /app; echo; echo '--- /app/scenario.toml ---'; sed -n '1,220p' /app/scenario.toml; \
+             echo; echo '--- grep green/endpoint ---'; grep -nE '^\\[green\\]|endpoint' /app/scenario.toml | head -n 50"
+
       - name: "Run assessment (agentbeats-client)"
         id: assess
         run: |
