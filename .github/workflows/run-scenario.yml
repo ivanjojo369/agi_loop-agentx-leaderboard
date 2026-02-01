@@ -1,6 +1,13 @@
 name: Run Scenario
 
 on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "scenario.toml"
+      - "generate_compose.py"
+      - "record_provenance.py"
+      - ".github/workflows/run-scenario.yml"
   workflow_dispatch:
     inputs:
       scenario_path:
@@ -8,29 +15,23 @@ on:
         required: false
         default: "scenario.toml"
       secrets_to_env:
-        description: "Comma-separated list of GitHub Action secret names to write into .env (e.g., OPENAI_API_KEY,ANTHROPIC_API_KEY)"
+        description: "Comma-separated GitHub Actions secret names to write into .env (default: OPENAI_API_KEY)"
         required: false
         default: "OPENAI_API_KEY"
-
-  push:
-    paths:
-      - "scenario.toml"
-      - "generate_compose.py"
-      - "record_provenance.py"
-      - ".github/workflows/run-scenario.yml"
 
 concurrency:
   group: run-scenario-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: write
+  pull-requests: write
+  packages: read
+
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-
-    permissions:
-      contents: write
-      packages: read
 
     env:
       SCENARIO_PATH: ${{ github.event.inputs.scenario_path || 'scenario.toml' }}
@@ -39,115 +40,129 @@ jobs:
       COMPOSE_DOCKER_CLI_BUILD: "0"
 
     steps:
-      - name: Checkout
+      - name: "Checkout"
         uses: actions/checkout@v4
 
-      - name: Sanity check scenario file exists
-        run: |
-          set -euo pipefail
-          echo "Using scenario: $SCENARIO_PATH"
-          test -f "$SCENARIO_PATH"
-
-      - name: Set up Python
+      - name: "Set up Python"
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install helper deps
+      - name: "Install small deps"
         run: |
           python -m pip install --upgrade pip
-          pip install tomli tomli-w pyyaml requests
+          pip install pyyaml
 
-      - name: Generate docker-compose.yml from scenario
+      - name: "Sanity check required files"
+        run: |
+          set -euo pipefail
+          echo "Using scenario: $SCENARIO_PATH"
+          test -f "$SCENARIO_PATH"
+          test -f generate_compose.py
+          test -f record_provenance.py
+
+      - name: "Generate docker-compose.yml from scenario"
         run: |
           set -euo pipefail
           python generate_compose.py --scenario "$SCENARIO_PATH"
+          test -f docker-compose.yml
           echo "Generated docker-compose.yml"
-          ls -lah docker-compose.yml
+          sed -n '1,220p' docker-compose.yml || true
 
-      - name: Generate a2a-scenario.toml (endpoints for agentbeats-client)
+      - name: "Create a2a-scenario.toml for agentbeats-client"
         run: |
           set -euo pipefail
           python - <<'PY'
           import os, json, tomllib
           from pathlib import Path
 
-          scenario_path = Path(os.environ.get('SCENARIO_PATH','scenario.toml'))
-          data = tomllib.loads(scenario_path.read_text(encoding='utf-8'))
+          scenario_path = Path(os.environ.get("SCENARIO_PATH","scenario.toml"))
+          data = tomllib.loads(scenario_path.read_text(encoding="utf-8"))
 
-          green = data.get('green_agent') or {}
-          participants = data.get('participants') or []
-          config = data.get('config') or {}
+          green = data.get("green_agent") or {}
+          participants = data.get("participants") or []
+          config = data.get("config") or {}
 
           def q(s: str) -> str:
-            # JSON string is also valid TOML basic string (double-quoted) for our purposes
-            return json.dumps(s)
-
-          def emit_kv(k, v):
-            if isinstance(v, bool):
-              return f"{k} = {'true' if v else 'false'}"
-            if isinstance(v, int):
-              return f"{k} = {v}"
-            if isinstance(v, float):
-              return f"{k} = {v}"
-            if isinstance(v, str):
-              return f"{k} = {q(v)}"
-            return None
+              return json.dumps(str(s))
 
           out = []
-          out.append('# Auto-generated for agentbeats-client (A2A endpoints)')
-          out.append('# Source: ' + str(scenario_path))
-          out.append('')
-          out.append('[green]')
-          out.append(emit_kv('endpoint', 'http://green-agent:9009'))
-          gid = green.get('agentbeats_id','')
+          out.append("# Auto-generated A2A scenario for agentbeats-client")
+          out.append(f"# Source: {scenario_path}")
+          out.append("")
+          out.append("[green]")
+          out.append(f"endpoint = {q('http://green-agent:9009')}")
+          gid = green.get("agentbeats_id")
           if gid:
-            out.append(emit_kv('agentbeats_id', str(gid)))
-          out.append('')
+              out.append(f"agentbeats_id = {q(gid)}")
+          out.append("")
 
           for p in participants:
-            name = p.get('name')
-            if not name:
-              continue
-            out.append('[[participants]]')
-            out.append(emit_kv('name', str(name)))
-            out.append(emit_kv('endpoint', f'http://{name}:9009'))
-            pid = p.get('agentbeats_id','')
-            if pid:
-              out.append(emit_kv('agentbeats_id', str(pid)))
-            out.append('')
+              name = p.get("name")
+              if not name:
+                  continue
+              out.append("[[participants]]")
+              out.append(f"name = {q(name)}")
+              out.append(f"endpoint = {q(f'http://{name}:9009')}")
+              pid = p.get("agentbeats_id")
+              if pid:
+                  out.append(f"agentbeats_id = {q(pid)}")
+              out.append("")
 
-          out.append('[config]')
-          # Preserve config keys verbatim (only primitives)
+          out.append("[config]")
           for k in sorted(config.keys()):
-            line = emit_kv(k, config[k])
-            if line is not None:
-              out.append(line)
-          out.append('')
+              v = config[k]
+              if isinstance(v, bool):
+                  out.append(f"{k} = {'true' if v else 'false'}")
+              elif isinstance(v, (int, float)):
+                  out.append(f"{k} = {v}")
+              elif isinstance(v, str):
+                  out.append(f"{k} = {q(v)}")
+          out.append("")
 
-          Path('a2a-scenario.toml').write_text('\n'.join(out), encoding='utf-8')
-          Path('output').mkdir(exist_ok=True)
-          Path('output/a2a-scenario.toml').write_text('\n'.join(out), encoding='utf-8')
-          print('Wrote a2a-scenario.toml and output/a2a-scenario.toml')
-          print('--- a2a-scenario.toml (first 200 lines) ---')
-          for i, line in enumerate(out[:200], start=1):
-            print(f"{i:03d} {line}")
+          Path("a2a-scenario.toml").write_text("\n".join(out), encoding="utf-8")
+          Path("output").mkdir(exist_ok=True)
+          Path("output/a2a-scenario.toml").write_text("\n".join(out), encoding="utf-8")
+
+          txt = Path("a2a-scenario.toml").read_text(encoding="utf-8")
+          if "[green]" not in txt or "endpoint" not in txt:
+              raise SystemExit("Generated a2a-scenario.toml missing [green]/endpoint")
+          print("Wrote a2a-scenario.toml")
           PY
 
-      - name: Show compose (debug)
+          echo "=== a2a-scenario.toml (first 160 lines) ==="
+          sed -n '1,160p' a2a-scenario.toml
+          test -s a2a-scenario.toml
+
+      - name: "Patch docker-compose.yml to mount a2a-scenario.toml into agentbeats-client"
         run: |
           set -euo pipefail
-          echo "===== docker-compose.yml (first 240 lines) ====="
-          sed -n '1,240p' docker-compose.yml || true
-          echo ""
-          echo "===== docker compose version ====="
-          docker compose version
-          echo ""
-          echo "===== RESOLVED docker compose config (first 260 lines) ====="
-          docker compose -f docker-compose.yml config > /tmp/compose.resolved.yml
-          sed -n '1,260p' /tmp/compose.resolved.yml || true
+          python - <<'PY'
+          import yaml
+          from pathlib import Path
 
-      - name: Prepare output folders and .env
+          p = Path("docker-compose.yml")
+          doc = yaml.safe_load(p.read_text(encoding="utf-8"))
+          services = doc.get("services") or {}
+          client = services.get("agentbeats-client")
+          if not client:
+              raise SystemExit("docker-compose.yml has no services.agentbeats-client")
+
+          vols = client.get("volumes") or []
+          vols2 = [v for v in vols if "/app/scenario.toml" not in str(v)]
+          vols2.insert(0, "./a2a-scenario.toml:/app/scenario.toml:ro")
+          client["volumes"] = vols2
+
+          services["agentbeats-client"] = client
+          doc["services"] = services
+          p.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+          print("Patched docker-compose.yml (agentbeats-client mounts /app/scenario.toml from a2a-scenario.toml)")
+          PY
+
+          echo "=== docker-compose.yml (first 260 lines after patch) ==="
+          sed -n '1,260p' docker-compose.yml
+
+      - name: "Prepare output folders and .env"
         env:
           SECRETS_JSON: ${{ toJson(secrets) }}
         run: |
@@ -161,118 +176,51 @@ jobs:
           wanted = [s.strip() for s in os.environ.get("SECRETS_TO_ENV","").split(",") if s.strip()]
           lines = []
           for k in wanted:
-            v = secrets.get(k, "")
-            if v is None: v = ""
-            lines.append(f"{k}={v}")
+              v = secrets.get(k, "")
+              if v is None:
+                  v = ""
+              lines.append(f"{k}={v}")
           pathlib.Path(".env").write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-          print("Wrote .env with keys:", wanted)
+
+          missing = [k for k in wanted if not secrets.get(k)]
+          if missing:
+              print("::warning::Some requested secrets are empty/missing:", ",".join(missing))
+          else:
+              print("All requested secrets are present (values not shown).")
           PY
 
-      - name: Pull images (explicit)
+      - name: "Compose config (resolved) and verify client reads green.endpoint"
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.yml config > /tmp/compose.resolved.yml
+
+          echo "=== Resolved agentbeats-client mounts (grep scenario.toml) ==="
+          grep -n "scenario.toml" /tmp/compose.resolved.yml || true
+
+          echo "=== Verify inside agentbeats-client container: /app/scenario.toml contains [green] endpoint ==="
+          docker compose -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc             "set -e; test -s /app/scenario.toml; grep -n '^\[green\]' /app/scenario.toml; grep -n 'endpoint' /app/scenario.toml | head -n 20"
+
+      - name: "Pull images"
         run: |
           set -euo pipefail
           docker compose -f docker-compose.yml pull
 
-      - name: "Preflight: start agent services and probe A2A endpoints (debug)"
+      - name: "Run assessment (agentbeats-client)"
         run: |
           set -euo pipefail
-          SERVICES="$(docker compose -f docker-compose.yml config --services || true)"
-          echo "Services:"
-          echo "$SERVICES"
+          docker compose -f docker-compose.yml up             --pull always             --no-build             --no-recreate             --timestamps             --no-color             --exit-code-from agentbeats-client             --abort-on-container-exit             agentbeats-client
 
-          up_if_exists () {
-            local svc="$1"
-            if echo "$SERVICES" | grep -qx "$svc"; then
-              echo "Starting $svc ..."
-              docker compose -f docker-compose.yml up -d --pull always --no-build "$svc"
-            else
-              echo "Service $svc not present (skip)."
-            fi
-          }
-
-          # These names cover the common patterns in AgentBeats leaderboard templates.
-          up_if_exists green-agent
-          up_if_exists attacker
-          up_if_exists defender
-          up_if_exists purple-agent
-
-          echo "===== compose ps (after starting agents) ====="
-          docker compose -f docker-compose.yml ps -a || true
-
-          # Determine the compose network name (best-effort).
-          NET="$(grep -E '^\s*name:\s+.*_agent-network\s*$' /tmp/compose.resolved.yml 2>/dev/null | head -n1 | awk '{print $2}' || true)"
-          if [ -z "$NET" ]; then
-            NET="$(docker network ls --format '{{.Name}}' | grep '_agent-network$' | head -n1 || true)"
-          fi
-          echo "Using NET=$NET"
-          if [ -z "$NET" ]; then
-            echo "::warning::Could not determine compose network name; skipping probes."
-            exit 0
-          fi
-
-          probe () {
-            local host="$1"
-            echo ""
-            echo "===== PROBE $host:9009 agent-card ====="
-            docker run --rm --network "$NET" curlimages/curl:8.6.0 -sS --max-time 8 \
-              "http://$host:9009/.well-known/agent-card.json" | head -c 2000; echo
-
-            echo "===== PROBE $host:9009 skills.list ====="
-            docker run --rm --network "$NET" curlimages/curl:8.6.0 -sS --globoff --max-time 10 -X POST \
-              "http://$host:9009/jsonrpc" -H "Content-Type: application/json" \
-              --data-raw '{"jsonrpc":"2.0","id":"p1","method":"skills.list","params":{}}' | head -c 4000; echo
-          }
-
-          for svc in green-agent attacker defender purple-agent; do
-            if echo "$SERVICES" | grep -qx "$svc"; then
-              probe "$svc" || echo "::warning::Probe failed for $svc"
-            fi
-          done
-
-      - name: Run assessment (agentbeats-client)
-        run: |
-          set -euo pipefail
-          docker compose -f docker-compose.yml up \
-            --pull always \
-            --no-build \
-            --no-recreate \
-            --timestamps \
-            --no-color \
-            --exit-code-from agentbeats-client \
-            --abort-on-container-exit \
-            agentbeats-client
-
-      - name: Post-run diagnostics (always)
+      - name: "Post-run diagnostics (always)"
         if: always()
         run: |
           set +e
           echo "===== docker compose ps ====="
           docker compose -f docker-compose.yml ps -a || true
           echo ""
-          echo "===== docker compose images ====="
-          docker compose -f docker-compose.yml images || true
-          echo ""
-          echo "===== container -> Config.Image ====="
-          for svc in green-agent attacker defender purple-agent agentbeats-client; do
-            cid="$(docker compose -f docker-compose.yml ps -a -q "$svc" 2>/dev/null || true)"
-            echo "---- $svc : $cid ----"
-            if [ -n "$cid" ]; then
-              docker inspect "$cid" --format '{{.Name}}  Config.Image={{.Config.Image}}  ImageID={{.Image}}' || true
-              docker inspect "$cid" --format '{{json .RepoDigests}}' || true
-            fi
-          done
-          echo ""
-          echo "===== logs (last 300 lines) ====="
-          docker compose -f docker-compose.yml logs --no-color --tail=300 || true
-          echo ""
-          echo "===== save full logs to output/logs (artifact) ====="
-          mkdir -p output/logs
-          docker compose -f docker-compose.yml logs --no-color > output/logs/compose.log 2>&1 || true
-          for svc in green-agent attacker defender purple-agent agentbeats-client; do
-            docker compose -f docker-compose.yml logs --no-color "$svc" > "output/logs/${svc}.log" 2>&1 || true
-          done
+          echo "===== logs (last 400 lines) ====="
+          docker compose -f docker-compose.yml logs --no-color --tail=400 || true
 
-      - name: Show outputs (always)
+      - name: "Show outputs (always)"
         if: always()
         run: |
           set +e
@@ -281,11 +229,7 @@ jobs:
           echo ""
           echo "=== output/a2a-scenario.toml (first 200 lines, if exists) ==="
           if [ -f output/a2a-scenario.toml ]; then
-            if [ ! -s output/a2a-scenario.toml ]; then
-              echo "::warning::output/a2a-scenario.toml exists but is EMPTY"
-            else
-              sed -n '1,200p' output/a2a-scenario.toml || true
-            fi
+            sed -n '1,200p' output/a2a-scenario.toml || true
           else
             echo "output/a2a-scenario.toml not found"
           fi
@@ -297,12 +241,12 @@ jobs:
             echo "output/results.json not found"
           fi
 
-      - name: Record provenance (always)
+      - name: "Record provenance (always)"
         if: always()
         run: |
           python record_provenance.py --compose docker-compose.yml --output output/provenance.json || true
 
-      - name: Upload debug artifacts (always)
+      - name: "Upload debug artifacts (always)"
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -310,34 +254,16 @@ jobs:
           path: |
             docker-compose.yml
             /tmp/compose.resolved.yml
+            a2a-scenario.toml
             output/**
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Validate results.json is NON-empty
+      - name: "Validate results.json is NON-empty"
         id: validate
         if: always()
         run: |
           set -euo pipefail
-          python - <<'PY'
-          import json, pathlib
-          p = pathlib.Path("output/results.json")
-          out = {"has_results": "false", "results_count": "0"}
-          if p.exists():
-            try:
-              d = json.loads(p.read_text(encoding="utf-8"))
-              r = d.get("results")
-              if isinstance(r, list):
-                out["results_count"] = str(len(r))
-                if len(r) > 0:
-                  out["has_results"] = "true"
-            except Exception:
-              pass
-          for k,v in out.items():
-            print(f"{k}={v}")
-          step_out = pathlib.Path().resolve() / "GITHUB_OUTPUT"
-          # GitHub provides $GITHUB_OUTPUT path, but we keep the print in stdout too.
-          PY
           echo "has_results=$(python - <<'PY'
           import json, pathlib
           p = pathlib.Path("output/results.json")
@@ -351,6 +277,7 @@ jobs:
           print("true" if isinstance(r,list) and len(r)>0 else "false")
           PY
           )" >> "$GITHUB_OUTPUT"
+
           echo "results_count=$(python - <<'PY'
           import json, pathlib
           p = pathlib.Path("output/results.json")
@@ -365,7 +292,7 @@ jobs:
           PY
           )" >> "$GITHUB_OUTPUT"
 
-      - name: Generate submission metadata
+      - name: "Generate submission metadata"
         id: metadata
         if: steps.validate.outputs.has_results == 'true'
         run: |
@@ -376,7 +303,7 @@ jobs:
           echo "unique_name=$UNIQUE_NAME" >> "$GITHUB_OUTPUT"
           echo "branch_name=submission-${UNIQUE_NAME}" >> "$GITHUB_OUTPUT"
 
-      - name: Copy files to submission directory
+      - name: "Copy files to submission directory"
         if: steps.validate.outputs.has_results == 'true'
         run: |
           set -euo pipefail
@@ -384,59 +311,30 @@ jobs:
           cp output/results.json "results/${{ steps.metadata.outputs.unique_name }}.json"
           if [ -f output/provenance.json ]; then
             cp output/provenance.json "submissions/${{ steps.metadata.outputs.unique_name }}.provenance.json"
-          else
-            echo "::warning::Missing output/provenance.json"
           fi
 
-      - name: Determine target repository (handles forks)
-        id: target
-        if: steps.validate.outputs.has_results == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          PARENT_REPO="$(gh api repos/${{ github.repository }} --jq '.parent.full_name // "${{ github.repository }}"')"
-          echo "repo=$PARENT_REPO" >> "$GITHUB_OUTPUT"
-          echo "Target repository: $PARENT_REPO"
-
-      - name: Create submission branch from upstream/main
+      - name: "Create submission branch from origin/main"
         if: steps.validate.outputs.has_results == 'true'
         run: |
           set -euo pipefail
-          git remote add upstream "https://github.com/${{ steps.target.outputs.repo }}.git" || true
-          git fetch upstream
-          git checkout -b "${{ steps.metadata.outputs.branch_name }}" upstream/main
+          git fetch origin
+          git checkout -b "${{ steps.metadata.outputs.branch_name }}" origin/main
 
-      - name: Commit results and push branch
+      - name: "Commit results and push branch"
         if: steps.validate.outputs.has_results == 'true'
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add \
-            "submissions/${{ steps.metadata.outputs.unique_name }}.toml" \
-            "results/${{ steps.metadata.outputs.unique_name }}.json" || true
+          git add "submissions/${{ steps.metadata.outputs.unique_name }}.toml" "results/${{ steps.metadata.outputs.unique_name }}.json" || true
           if [ -f "submissions/${{ steps.metadata.outputs.unique_name }}.provenance.json" ]; then
             git add "submissions/${{ steps.metadata.outputs.unique_name }}.provenance.json"
           fi
-          git commit -m "Submission: ${{ steps.metadata.outputs.unique_name }}
-
-          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" || echo "Nothing to commit"
+          git commit -m "Submission: ${{ steps.metadata.outputs.unique_name }}" || echo "Nothing to commit"
           git push origin "${{ steps.metadata.outputs.branch_name }}"
           echo "::notice title=Submission Branch Created::Branch: ${{ steps.metadata.outputs.branch_name }}"
 
-      - name: Output PR link
-        if: steps.validate.outputs.has_results == 'true'
-        run: |
-          echo "### Submit your results" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Results count: ${{ steps.validate.outputs.results_count }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "[Open a pull request](https://github.com/${{ steps.target.outputs.repo }}/compare/main...${{ github.repository_owner }}:${{ github.event.repository.name }}:${{ steps.metadata.outputs.branch_name }}?expand=1)" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "⚠️ When creating the PR, UNCHECK 'Allow edits and access to secrets by maintainers' to protect your secrets." >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Fail run if results are empty (prevents 'Success with empty results')
+      - name: "Fail run if results are empty"
         if: always()
         run: |
           set -euo pipefail
@@ -445,7 +343,7 @@ jobs:
             exit 1
           fi
 
-      - name: Cleanup (always)
+      - name: "Cleanup (always)"
         if: always()
         run: |
           docker compose -f docker-compose.yml down -v || true
