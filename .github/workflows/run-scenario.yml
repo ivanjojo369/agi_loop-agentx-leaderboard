@@ -65,40 +65,73 @@ jobs:
           echo "Generated docker-compose.yml"
           ls -lah docker-compose.yml
 
-
-      - name: Write a2a-scenario.toml (endpoints for agentbeats-client)
+      - name: Generate a2a-scenario.toml (endpoints for agentbeats-client)
         run: |
           set -euo pipefail
           python - <<'PY'
-          import os, pathlib, tomllib
-          import tomli_w
+          import os, json, tomllib
+          from pathlib import Path
 
-          scenario_path = pathlib.Path(os.environ.get("SCENARIO_PATH","scenario.toml"))
-          data = tomllib.loads(scenario_path.read_text(encoding="utf-8"))
+          scenario_path = Path(os.environ.get('SCENARIO_PATH','scenario.toml'))
+          data = tomllib.loads(scenario_path.read_text(encoding='utf-8'))
 
-          gsrc = data.get("green_agent") or data.get("green") or {}
-          green_id = gsrc.get("agentbeats_id","")
+          green = data.get('green_agent') or {}
+          participants = data.get('participants') or []
+          config = data.get('config') or {}
 
-          participants = []
-          for p in data.get("participants", []):
-              name = p.get("name")
-              if not name:
-                  raise SystemExit("Each [[participants]] must have name (e.g. attacker/defender)")
-              participants.append({
-                  "name": name,
-                  "endpoint": f"http://{name}:9009",
-                  "agentbeats_id": p.get("agentbeats_id",""),
-              })
+          def q(s: str) -> str:
+            # JSON string is also valid TOML basic string (double-quoted) for our purposes
+            return json.dumps(s)
 
-          out = {
-              "green": {"endpoint": "http://green-agent:9009", "agentbeats_id": green_id},
-              "participants": participants,
-              "config": data.get("config", {}),
-          }
+          def emit_kv(k, v):
+            if isinstance(v, bool):
+              return f"{k} = {'true' if v else 'false'}"
+            if isinstance(v, int):
+              return f"{k} = {v}"
+            if isinstance(v, float):
+              return f"{k} = {v}"
+            if isinstance(v, str):
+              return f"{k} = {q(v)}"
+            return None
 
-          pathlib.Path("a2a-scenario.toml").write_text(tomli_w.dumps(out), encoding="utf-8")
-          print("=== a2a-scenario.toml ===")
-          print(pathlib.Path("a2a-scenario.toml").read_text(encoding="utf-8"))
+          out = []
+          out.append('# Auto-generated for agentbeats-client (A2A endpoints)')
+          out.append('# Source: ' + str(scenario_path))
+          out.append('')
+          out.append('[green]')
+          out.append(emit_kv('endpoint', 'http://green-agent:9009'))
+          gid = green.get('agentbeats_id','')
+          if gid:
+            out.append(emit_kv('agentbeats_id', str(gid)))
+          out.append('')
+
+          for p in participants:
+            name = p.get('name')
+            if not name:
+              continue
+            out.append('[[participants]]')
+            out.append(emit_kv('name', str(name)))
+            out.append(emit_kv('endpoint', f'http://{name}:9009'))
+            pid = p.get('agentbeats_id','')
+            if pid:
+              out.append(emit_kv('agentbeats_id', str(pid)))
+            out.append('')
+
+          out.append('[config]')
+          # Preserve config keys verbatim (only primitives)
+          for k in sorted(config.keys()):
+            line = emit_kv(k, config[k])
+            if line is not None:
+              out.append(line)
+          out.append('')
+
+          Path('a2a-scenario.toml').write_text('\n'.join(out), encoding='utf-8')
+          Path('output').mkdir(exist_ok=True)
+          Path('output/a2a-scenario.toml').write_text('\n'.join(out), encoding='utf-8')
+          print('Wrote a2a-scenario.toml and output/a2a-scenario.toml')
+          print('--- a2a-scenario.toml (first 200 lines) ---')
+          for i, line in enumerate(out[:200], start=1):
+            print(f"{i:03d} {line}")
           PY
 
       - name: Show compose (debug)
@@ -231,6 +264,13 @@ jobs:
           echo ""
           echo "===== logs (last 300 lines) ====="
           docker compose -f docker-compose.yml logs --no-color --tail=300 || true
+          echo ""
+          echo "===== save full logs to output/logs (artifact) ====="
+          mkdir -p output/logs
+          docker compose -f docker-compose.yml logs --no-color > output/logs/compose.log 2>&1 || true
+          for svc in green-agent attacker defender purple-agent agentbeats-client; do
+            docker compose -f docker-compose.yml logs --no-color "$svc" > "output/logs/${svc}.log" 2>&1 || true
+          done
 
       - name: Show outputs (always)
         if: always()
@@ -239,15 +279,15 @@ jobs:
           echo "=== output/ ==="
           ls -la output || true
           echo ""
-          echo "=== a2a-scenario.toml (first 200 lines, if exists) ==="
-          if [ -f a2a-scenario.toml ]; then
-            if [ ! -s a2a-scenario.toml ]; then
-              echo "::warning::a2a-scenario.toml exists but is EMPTY"
+          echo "=== output/a2a-scenario.toml (first 200 lines, if exists) ==="
+          if [ -f output/a2a-scenario.toml ]; then
+            if [ ! -s output/a2a-scenario.toml ]; then
+              echo "::warning::output/a2a-scenario.toml exists but is EMPTY"
             else
-              sed -n '1,200p' a2a-scenario.toml || true
+              sed -n '1,200p' output/a2a-scenario.toml || true
             fi
           else
-            echo "a2a-scenario.toml not found"
+            echo "output/a2a-scenario.toml not found"
           fi
           echo ""
           echo "=== output/results.json (first 2000 chars, if exists) ==="
@@ -409,4 +449,3 @@ jobs:
         if: always()
         run: |
           docker compose -f docker-compose.yml down -v || true
-          
