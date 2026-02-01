@@ -211,6 +211,17 @@ jobs:
           set -euo pipefail
           docker compose -f docker-compose.yml pull
 
+      - name: "Pre-run: show host a2a-scenario.toml"
+        run: |
+          set -euo pipefail
+          echo "=== host a2a-scenario.toml (first 220 lines) ==="
+          sed -n '1,220p' a2a-scenario.toml
+          echo
+          echo "=== grep [green]/endpoint in host file ==="
+          grep -nE '^\[green\]|endpoint' a2a-scenario.toml | head -n 80
+          test -s a2a-scenario.toml
+          grep -q '^\[green\]' a2a-scenario.toml
+          grep -q 'endpoint' a2a-scenario.toml
 
       - name: "Pre-run: show /app/scenario.toml inside agentbeats-client"
         run: |
@@ -218,16 +229,16 @@ jobs:
           echo "=== docker compose config (agentbeats-client excerpt) ==="
           docker compose -f docker-compose.yml config | awk '
             BEGIN{p=0}
-            /^services:/{p=0}
             /agentbeats-client:/{p=1}
             p==1{print}
-          ' | sed -n '1,220p' || true
+          ' | sed -n '1,240p' || true
 
           echo ""
           echo "=== /app/scenario.toml inside agentbeats-client ==="
           docker compose -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc \
-            "set -e; pwd; ls -la /app; echo; echo '--- /app/scenario.toml ---'; sed -n '1,220p' /app/scenario.toml; \
-             echo; echo '--- grep green/endpoint ---'; grep -nE '^\\[green\\]|endpoint' /app/scenario.toml | head -n 50"
+            "set -e; pwd; ls -la /app; echo; echo '--- /app/scenario.toml ---'; sed -n '1,260p' /app/scenario.toml; \
+             echo; echo '--- grep green/endpoint ---'; grep -nE '^\[green\]|endpoint' /app/scenario.toml | head -n 80; \
+             echo; echo '--- ASSERT ---'; grep -q '^\[green\]' /app/scenario.toml; grep -q 'endpoint' /app/scenario.toml"
 
       - name: "Run assessment (agentbeats-client)"
         id: assess
