@@ -2,7 +2,7 @@
 # IMPORTANT: Do NOT paste API keys here. Use GitHub Actions Secrets instead.
 # - Repo Settings -> Secrets and variables -> Actions -> New repository secret
 #   Name: OPENAI_API_KEY
-# - The workflow writes it into a .env file and injects it into the containers.
+# - The workflow writes it into a .env file (not committed) and injects it into the containers.
 
 [green_agent]
 agentbeats_id = "019bdcd0-041c-7d23-a7ef-2470d62afdeb"
@@ -22,8 +22,10 @@ env = { OPENAI_API_KEY = "${OPENAI_API_KEY}" }
 # Which scenario family to run inside your green evaluator
 scenario_set = "security_arena_phase1"
 
-# Minimum needed so the runner generates tasks (avoid results: [])
+# This is how the runner/green agent knows it should pull tasks from the security arena domain.
 domain = "security_arena"
+
+# Must be >0 or you will (correctly) end up with results: []
 num_tasks = 3
 
 # Run controls
