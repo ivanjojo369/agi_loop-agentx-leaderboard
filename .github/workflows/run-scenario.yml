@@ -51,8 +51,7 @@ jobs:
       - name: "Install small deps"
         run: |
           python -m pip install --upgrade pip
-          pip install pyyaml
-
+          pip install pyyaml tomli tomli-w requests
       - name: "Sanity check required files"
         run: |
           set -euo pipefail
@@ -62,6 +61,7 @@ jobs:
           test -f record_provenance.py
 
       - name: "Generate docker-compose.yml from scenario"
+        id: gen
         run: |
           set -euo pipefail
           python generate_compose.py --scenario "$SCENARIO_PATH"
@@ -206,6 +206,7 @@ jobs:
           docker compose -f docker-compose.yml pull
 
       - name: "Run assessment (agentbeats-client)"
+        id: assess
         run: |
           set -euo pipefail
           docker compose -f docker-compose.yml up             --pull always             --no-build             --no-recreate             --timestamps             --no-color             --exit-code-from agentbeats-client             --abort-on-container-exit             agentbeats-client
@@ -261,7 +262,7 @@ jobs:
 
       - name: "Validate results.json is NON-empty"
         id: validate
-        if: always()
+        if: always() && steps.assess.outcome != 'skipped'
         run: |
           set -euo pipefail
           echo "has_results=$(python - <<'PY'
@@ -335,7 +336,7 @@ jobs:
           echo "::notice title=Submission Branch Created::Branch: ${{ steps.metadata.outputs.branch_name }}"
 
       - name: "Fail run if results are empty"
-        if: always()
+        if: always() && steps.assess.outcome != 'skipped'
         run: |
           set -euo pipefail
           if [ "${{ steps.validate.outputs.has_results }}" != "true" ]; then
