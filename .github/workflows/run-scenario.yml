@@ -240,11 +240,20 @@ jobs:
              echo; echo '--- grep green/endpoint ---'; grep -nE '^\[green\]|endpoint' /app/scenario.toml | head -n 80; \
              echo; echo '--- ASSERT ---'; grep -q '^\[green\]' /app/scenario.toml; grep -q 'endpoint' /app/scenario.toml"
 
+      - name: "Start agent services (green/attacker/defender)"
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.yml up -d --no-build --pull always attacker defender green-agent
+          echo "Waiting a bit for services to be ready..."
+          sleep 3
+          docker compose -f docker-compose.yml ps
+
       - name: "Run assessment (agentbeats-client)"
         id: assess
         run: |
           set -euo pipefail
-          docker compose -f docker-compose.yml up             --pull always             --no-build             --no-recreate             --timestamps             --no-color             --exit-code-from agentbeats-client             --abort-on-container-exit             agentbeats-client
+          # Run client with explicit absolute-path args to avoid any WORKDIR/relative-path issues.
+          docker compose -f docker-compose.yml run --rm --no-deps --timestamps --no-color agentbeats-client /app/scenario.toml /app/output/results.json
 
       - name: "Post-run diagnostics (always)"
         if: always()
