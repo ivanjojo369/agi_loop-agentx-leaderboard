@@ -1,0 +1,29 @@
+# Auto-generated A2A scenario for agentbeats-client
+# Source reference: scenario.toml (leaderboard format)
+#
+# IMPORTANT
+# - These endpoints must be reachable *from inside the Docker Compose network*.
+# - Do NOT use localhost here. Use the Compose service names.
+# - If your compose exposes a different port than 9009, update the port below.
+
+[green]
+# Green evaluator / judge service (Compose service name: green-agent)
+endpoint = "http://green-agent:9009"
+agentbeats_id = "019bdcd0-041c-7d23-a7ef-2470d62afdeb"
+
+[[participants]]
+name = "attacker"
+endpoint = "http://attacker:9009"
+agentbeats_id = "019bfc07-c82f-7fe2-8302-0ed656298c79"
+
+[[participants]]
+name = "defender"
+endpoint = "http://defender:9009"
+agentbeats_id = "019c1163-b141-7131-9769-08300b1c1511"
+
+[config]
+scenario_set = "security_arena_phase1"
+domain = "security_arena"
+num_tasks = 3
+max_rounds = 15
+seed = 1
