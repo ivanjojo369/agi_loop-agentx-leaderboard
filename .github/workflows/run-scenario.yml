@@ -58,25 +58,65 @@ jobs:
           python -m pip install --upgrade pip
           pip install tomli tomli-w pyyaml requests
 
+      - name: Ensure runner helper scripts exist
+        run: |
+          set -euo pipefail
+          if [ ! -f generate_compose.py ]; then
+            echo "::warning::generate_compose.py not found; downloading official template version"
+            curl -fsSL -o generate_compose.py https://raw.githubusercontent.com/RDI-Foundation/agentbeats-leaderboard-template/main/generate_compose.py
+          fi
+          if [ ! -f record_provenance.py ]; then
+            echo "::warning::record_provenance.py not found; downloading official template version"
+            curl -fsSL -o record_provenance.py https://raw.githubusercontent.com/RDI-Foundation/agentbeats-leaderboard-template/main/record_provenance.py
+          fi
+          echo "generate_compose.py bytes: $(python - <<'PY'
+          import pathlib
+          print(pathlib.Path('generate_compose.py').stat().st_size)
+          PY
+          )"
+          echo "record_provenance.py bytes: $(python - <<'PY'
+          import pathlib
+          p=pathlib.Path('record_provenance.py')
+          print(p.stat().st_size if p.exists() else 0)
+          PY
+          )"
+
       - name: Generate docker-compose.yml from scenario
         run: |
           set -euo pipefail
           python generate_compose.py --scenario "$SCENARIO_PATH"
+          if [ ! -s docker-compose.yml ]; then
+            echo "::error::docker-compose.yml was not generated (missing or empty)."
+            ls -lah
+            exit 1
+          fi
           echo "Generated docker-compose.yml"
           ls -lah docker-compose.yml
-
-      - name: Show compose (debug)
+      - name: Materialize scenario for agentbeats-client mount (prevents empty results)
         run: |
           set -euo pipefail
-          echo "===== docker-compose.yml (first 240 lines) ====="
-          sed -n '1,240p' docker-compose.yml || true
-          echo ""
-          echo "===== docker compose version ====="
-          docker compose version
-          echo ""
-          echo "===== RESOLVED docker compose config (first 260 lines) ====="
-          docker compose -f docker-compose.yml config > /tmp/compose.resolved.yml
-          sed -n '1,260p' /tmp/compose.resolved.yml || true
+          # Ensure the file referenced by docker-compose bind-mount exists and is non-empty.
+          cp "$SCENARIO_PATH" a2a-scenario.toml
+          cp "$SCENARIO_PATH" scenario.for-compose.toml
+
+          # Patch docker-compose.yml so agentbeats-client mounts scenario.for-compose.toml instead of a2a-scenario.toml.
+          python - <<'PY'
+          import pathlib, re
+          p = pathlib.Path("docker-compose.yml")
+          t = p.read_text(encoding="utf-8")
+          t2, n = re.subn(
+              r"(\s*-\s*)\./a2a-scenario\.toml:/app/scenario\.toml",
+              r"\1./scenario.for-compose.toml:/app/scenario.toml",
+              t
+          )
+          p.write_text(t2, encoding="utf-8")
+          print(f"Patched agentbeats-client scenario mount: {n} replacement(s)")
+          PY
+
+          test -s a2a-scenario.toml
+          test -s scenario.for-compose.toml
+          echo "===== scenario.for-compose.toml (first 120 lines) ====="
+          sed -n '1,120p' scenario.for-compose.toml
 
       - name: Prepare output folders and .env
         env:
@@ -96,9 +136,37 @@ jobs:
             if v is None: v = ""
             lines.append(f"{k}={v}")
           pathlib.Path(".env").write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+          missing = [k for k in wanted if not secrets.get(k)]
           print("Wrote .env with keys:", wanted)
+          if missing:
+            print("::warning::Some requested secrets were empty/missing:", ",".join(missing))
           PY
 
+
+      - name: Show compose (debug, redacted)
+        run: |
+          set -euo pipefail
+          echo "===== docker-compose.yml (first 260 lines) ====="
+          sed -n '1,260p' docker-compose.yml || true
+          echo ""
+          echo "===== docker compose version ====="
+          docker compose version
+          echo ""
+          echo "===== RESOLVED docker compose config (first 320 lines, redacted) ====="
+          docker compose -f docker-compose.yml config > /tmp/compose.resolved.yml
+
+          # Redact any secrets that were written into .env.
+          KEYS="$(echo "$SECRETS_TO_ENV" | tr ',' ' ')"
+          cp /tmp/compose.resolved.yml /tmp/compose.resolved.redacted.yml
+          for k in $KEYS; do
+            # YAML key style: OPENAI_API_KEY: <value>
+            sed -i -E "s/^([[:space:]]*${k}:[[:space:]]*).*/\1REDACTED/" /tmp/compose.resolved.redacted.yml || true
+            # list style: - OPENAI_API_KEY=<value>
+            sed -i -E "s/^([[:space:]]*-[[:space:]]*${k}=).*/\1REDACTED/" /tmp/compose.resolved.redacted.yml || true
+          done
+          mv /tmp/compose.resolved.redacted.yml /tmp/compose.resolved.yml
+
+          sed -n '1,320p' /tmp/compose.resolved.yml || true
       - name: Pull images (explicit)
         run: |
           set -euo pipefail
@@ -200,6 +268,27 @@ jobs:
         if: always()
         run: |
           set +e
+          echo "=== root files ==="
+          ls -la . || true
+          echo ""
+          echo "=== a2a-scenario.toml (root, first 200 lines) ==="
+          if [ -f a2a-scenario.toml ]; then
+            if [ ! -s a2a-scenario.toml ]; then
+              echo "::warning::a2a-scenario.toml exists but is EMPTY"
+            else
+              sed -n '1,200p' a2a-scenario.toml || true
+            fi
+          else
+            echo "a2a-scenario.toml not found"
+          fi
+          echo ""
+          echo "=== scenario.for-compose.toml (root, first 200 lines) ==="
+          if [ -f scenario.for-compose.toml ]; then
+            sed -n '1,200p' scenario.for-compose.toml || true
+          else
+            echo "scenario.for-compose.toml not found"
+          fi
+          echo ""
           echo "=== output/ ==="
           ls -la output || true
           echo ""
@@ -214,13 +303,12 @@ jobs:
             echo "output/a2a-scenario.toml not found"
           fi
           echo ""
-          echo "=== output/results.json (first 2000 chars, if exists) ==="
+          echo "=== output/results.json (first 4000 chars, if exists) ==="
           if [ -f output/results.json ]; then
-            head -c 2000 output/results.json; echo
+            head -c 4000 output/results.json; echo
           else
             echo "output/results.json not found"
           fi
-
       - name: Record provenance (always)
         if: always()
         run: |
@@ -234,61 +322,36 @@ jobs:
           path: |
             docker-compose.yml
             /tmp/compose.resolved.yml
+            a2a-scenario.toml
+            scenario.for-compose.toml
+            scenario.toml
             output/**
           if-no-files-found: warn
           retention-days: 7
-
       - name: Validate results.json is NON-empty
         id: validate
         if: always()
         run: |
           set -euo pipefail
           python - <<'PY'
-          import json, pathlib
+          import json, pathlib, os
           p = pathlib.Path("output/results.json")
-          out = {"has_results": "false", "results_count": "0"}
+          has = False
+          count = 0
           if p.exists():
             try:
               d = json.loads(p.read_text(encoding="utf-8"))
               r = d.get("results")
               if isinstance(r, list):
-                out["results_count"] = str(len(r))
-                if len(r) > 0:
-                  out["has_results"] = "true"
+                count = len(r)
+                has = count > 0
             except Exception:
               pass
-          for k,v in out.items():
-            print(f"{k}={v}")
-          step_out = pathlib.Path().resolve() / "GITHUB_OUTPUT"
-          # GitHub provides $GITHUB_OUTPUT path, but we keep the print in stdout too.
+          out = pathlib.Path(os.environ["GITHUB_OUTPUT"])
+          out.write_text(f"has_results={'true' if has else 'false'}\nresults_count={count}\n", encoding="utf-8")
+          print(f"has_results={'true' if has else 'false'}")
+          print(f"results_count={count}")
           PY
-          echo "has_results=$(python - <<'PY'
-          import json, pathlib
-          p = pathlib.Path("output/results.json")
-          if not p.exists():
-            print("false"); raise SystemExit(0)
-          try:
-            d = json.loads(p.read_text(encoding="utf-8"))
-          except Exception:
-            print("false"); raise SystemExit(0)
-          r = d.get("results")
-          print("true" if isinstance(r,list) and len(r)>0 else "false")
-          PY
-          )" >> "$GITHUB_OUTPUT"
-          echo "results_count=$(python - <<'PY'
-          import json, pathlib
-          p = pathlib.Path("output/results.json")
-          if not p.exists():
-            print(0); raise SystemExit(0)
-          try:
-            d = json.loads(p.read_text(encoding="utf-8"))
-          except Exception:
-            print(0); raise SystemExit(0)
-          r = d.get("results")
-          print(len(r) if isinstance(r,list) else 0)
-          PY
-          )" >> "$GITHUB_OUTPUT"
-
       - name: Generate submission metadata
         id: metadata
         if: steps.validate.outputs.has_results == 'true'
