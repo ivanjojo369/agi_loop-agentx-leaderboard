@@ -134,7 +134,7 @@ jobs:
           sed -n '1,160p' a2a-scenario.toml
           test -s a2a-scenario.toml
 
-      - name: "Patch docker-compose.yml to mount a2a-scenario.toml into agentbeats-client"
+      - name: "Patch docker-compose.yml for agentbeats-client (mount + absolute paths)"
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -148,19 +148,25 @@ jobs:
           if not client:
               raise SystemExit("docker-compose.yml has no services.agentbeats-client")
 
+          # Ensure mount of a2a-scenario.toml -> /app/scenario.toml
           vols = client.get("volumes") or []
           vols2 = [v for v in vols if "/app/scenario.toml" not in str(v)]
           vols2.insert(0, "./a2a-scenario.toml:/app/scenario.toml:ro")
           client["volumes"] = vols2
 
+          # Make path resolution bulletproof (avoid reading some other scenario.toml in image)
+          client["working_dir"] = "/app"
+          client["command"] = ["/app/scenario.toml", "/app/output/results.json"]
+
           services["agentbeats-client"] = client
           doc["services"] = services
           p.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
-          print("Patched docker-compose.yml (agentbeats-client mounts /app/scenario.toml from a2a-scenario.toml)")
+          print("Patched docker-compose.yml: agentbeats-client uses /app/scenario.toml and /app/output/results.json")
           PY
 
-          echo "=== docker-compose.yml (first 260 lines after patch) ==="
-          sed -n '1,260p' docker-compose.yml
+          echo "=== docker-compose.yml (first 280 lines after patch) ==="
+          sed -n '1,280p' docker-compose.yml
+
 
       - name: "Prepare output folders and .env"
         env:
