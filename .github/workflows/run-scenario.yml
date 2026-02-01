@@ -43,6 +43,13 @@ jobs:
       - name: "Checkout"
         uses: actions/checkout@v4
 
+
+      - name: "Docker versions"
+        run: |
+          set -euo pipefail
+          docker --version
+          docker compose version
+
       - name: "Set up Python"
         uses: actions/setup-python@v5
         with:
@@ -168,6 +175,80 @@ jobs:
           sed -n '1,280p' docker-compose.yml
 
 
+
+      - name: "Strict validate A2A TOML + compose wiring"
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import tomllib, yaml, sys
+          from pathlib import Path
+          from urllib.parse import urlparse
+
+          a2a = Path("a2a-scenario.toml")
+          if not a2a.exists() or a2a.stat().st_size == 0:
+              raise SystemExit("a2a-scenario.toml missing/empty")
+
+          data = tomllib.loads(a2a.read_text(encoding="utf-8"))
+
+          def must(cond, msg):
+              if not cond:
+                  print("::error::" + msg)
+                  raise SystemExit(2)
+
+          green = data.get("green")
+          must(isinstance(green, dict), "A2A TOML: missing [green] table")
+          ge = green.get("endpoint")
+          must(isinstance(ge, str) and ge.strip(), "A2A TOML: green.endpoint is required")
+          g_url = urlparse(ge)
+          must(g_url.scheme in ("http","https") and g_url.hostname, f"A2A TOML: green.endpoint invalid URL: {ge!r}")
+          must(g_url.hostname not in ("localhost","127.0.0.1"), f"A2A TOML: green.endpoint must not be localhost in Actions: {ge!r}")
+
+          parts = data.get("participants")
+          must(parts is not None, "A2A TOML: participants is required")
+          endpoints = []
+          if isinstance(parts, list):
+              for i, p in enumerate(parts):
+                  must(isinstance(p, dict), f"A2A TOML: participants[{i}] is not a table")
+                  ep = p.get("endpoint")
+                  must(isinstance(ep, str) and ep.strip(), f"A2A TOML: participants[{i}].endpoint required")
+                  u = urlparse(ep)
+                  must(u.scheme in ("http","https") and u.hostname, f"A2A TOML: participants[{i}].endpoint invalid URL: {ep!r}")
+                  must(u.hostname not in ("localhost","127.0.0.1"), f"A2A TOML: participants[{i}].endpoint must not be localhost in Actions: {ep!r}")
+                  endpoints.append(u.hostname)
+          elif isinstance(parts, dict):
+              for k, ep in parts.items():
+                  must(isinstance(ep, str) and ep.strip(), f"A2A TOML: participants.{k} endpoint required")
+                  u = urlparse(ep)
+                  must(u.scheme in ("http","https") and u.hostname, f"A2A TOML: participants.{k} invalid URL: {ep!r}")
+                  must(u.hostname not in ("localhost","127.0.0.1"), f"A2A TOML: participants.{k} must not be localhost in Actions: {ep!r}")
+                  endpoints.append(u.hostname)
+          else:
+              must(False, "A2A TOML: participants must be list or table")
+
+          compose = yaml.safe_load(Path("docker-compose.yml").read_text(encoding="utf-8"))
+          services = (compose.get("services") or {})
+          must("agentbeats-client" in services, "compose: services.agentbeats-client missing")
+          client = services["agentbeats-client"]
+          vols = client.get("volumes") or []
+          vol_str = "\n".join(str(v) for v in vols)
+          must("/app/scenario.toml" in vol_str, "compose: agentbeats-client must mount /app/scenario.toml")
+          must("a2a-scenario.toml" in vol_str, "compose: agentbeats-client must mount a2a-scenario.toml")
+
+          # Ensure endpoint hostnames map to compose service names (DNS within compose network)
+          expected_hosts = set(services.keys())
+          missing = [h for h in ([g_url.hostname] + endpoints) if h not in expected_hosts]
+          if missing:
+              print("::warning::Endpoint hostnames not found as compose services: " + ", ".join(missing))
+              print("Known services: " + ", ".join(sorted(expected_hosts)))
+
+          cfg = data.get("config", {})
+          if not (isinstance(cfg, dict) and "domain" in cfg and "num_tasks" in cfg):
+              print("::warning::A2A TOML: recommend [config].domain and [config].num_tasks for leaderboard runs")
+
+          print("OK: green.endpoint =", ge)
+          print("OK: participant hosts =", endpoints)
+          PY
+
       - name: "Prepare output folders and .env"
         env:
           SECRETS_JSON: ${{ toJson(secrets) }}
@@ -198,18 +279,18 @@ jobs:
       - name: "Compose config (resolved) and verify client reads green.endpoint"
         run: |
           set -euo pipefail
-          docker compose -f docker-compose.yml config > /tmp/compose.resolved.yml
+          docker compose --ansi never -f docker-compose.yml config > /tmp/compose.resolved.yml
 
           echo "=== Resolved agentbeats-client mounts (grep scenario.toml) ==="
           grep -n "scenario.toml" /tmp/compose.resolved.yml || true
 
           echo "=== Verify inside agentbeats-client container: /app/scenario.toml contains [green] endpoint ==="
-          docker compose -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc             "set -e; test -s /app/scenario.toml; grep -n '^\[green\]' /app/scenario.toml; grep -n 'endpoint' /app/scenario.toml | head -n 20"
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc             "set -e; test -s /app/scenario.toml; grep -n '^\[green\]' /app/scenario.toml; grep -n 'endpoint' /app/scenario.toml | head -n 20"
 
       - name: "Pull images"
         run: |
           set -euo pipefail
-          docker compose -f docker-compose.yml pull
+          docker compose --ansi never -f docker-compose.yml pull
 
       - name: "Pre-run: show host a2a-scenario.toml"
         run: |
@@ -227,7 +308,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "=== docker compose config (agentbeats-client excerpt) ==="
-          docker compose -f docker-compose.yml config | awk '
+          docker compose --ansi never -f docker-compose.yml config | awk '
             BEGIN{p=0}
             /agentbeats-client:/{p=1}
             p==1{print}
@@ -235,7 +316,7 @@ jobs:
 
           echo ""
           echo "=== /app/scenario.toml inside agentbeats-client ==="
-          docker compose -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc \
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc \
             "set -e; pwd; ls -la /app; echo; echo '--- /app/scenario.toml ---'; sed -n '1,260p' /app/scenario.toml; \
              echo; echo '--- grep green/endpoint ---'; grep -nE '^\[green\]|endpoint' /app/scenario.toml | head -n 80; \
              echo; echo '--- ASSERT ---'; grep -q '^\[green\]' /app/scenario.toml; grep -q 'endpoint' /app/scenario.toml"
@@ -243,27 +324,94 @@ jobs:
       - name: "Start agent services (green/attacker/defender)"
         run: |
           set -euo pipefail
-          docker compose -f docker-compose.yml up -d --no-build --pull always attacker defender green-agent
+          docker compose --ansi never -f docker-compose.yml up -d --no-build --pull always attacker defender green-agent
           echo "Waiting a bit for services to be ready..."
           sleep 3
-          docker compose -f docker-compose.yml ps
+          docker compose --ansi never -f docker-compose.yml ps
+
+
+      - name: "Wait for A2A agent cards to be reachable"
+        run: |
+          set -euo pipefail
+          echo "Probing /.well-known/agent.json from inside the compose network via agentbeats-client..."
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc '
+          set -e
+          python - <<PY
+          import time, tomllib, urllib.request
+          
+          data = tomllib.load(open("/app/scenario.toml","rb"))
+          
+          def collect_targets():
+              out = []
+              g = data.get("green") or {}
+              if isinstance(g, dict) and isinstance(g.get("endpoint"), str):
+                  out.append(("green", g["endpoint"].rstrip("/") + "/.well-known/agent.json"))
+          
+              parts = data.get("participants")
+              if isinstance(parts, list):
+                  for i, p in enumerate(parts):
+                      if isinstance(p, dict) and isinstance(p.get("endpoint"), str):
+                          out.append((f"participant[{i}]", p["endpoint"].rstrip("/") + "/.well-known/agent.json"))
+              elif isinstance(parts, dict):
+                  for k, ep in parts.items():
+                      if isinstance(ep, str):
+                          out.append((f"participant.{k}", ep.rstrip("/") + "/.well-known/agent.json"))
+              return out
+          
+          targets = collect_targets()
+          print("Targets:", targets)
+          
+          def try_get(url):
+              req = urllib.request.Request(url, headers={"User-Agent": "agentbeats-healthcheck"})
+              with urllib.request.urlopen(req, timeout=3) as r:
+                  return r.status, r.read(512)
+          
+          deadline = time.time() + 45
+          pending = targets[:]
+          last_err = {}
+          
+          while pending and time.time() < deadline:
+              nxt = []
+              for name, url in pending:
+                  try:
+                      st, _ = try_get(url)
+                      if st == 200:
+                          print("READY", name, url)
+                      else:
+                          last_err[name] = f"status {st}"
+                          nxt.append((name, url))
+                  except Exception as e:
+                      last_err[name] = repr(e)
+                      nxt.append((name, url))
+              pending = nxt
+              if pending:
+                  time.sleep(2)
+          
+          if pending:
+              print("NOT READY:", pending)
+              print("Last errors:", last_err)
+              raise SystemExit(2)
+          
+          print("All agent cards reachable.")
+          PY
+          '
 
       - name: "Run assessment (agentbeats-client)"
         id: assess
         run: |
           set -euo pipefail
           # Run client with explicit absolute-path args to avoid any WORKDIR/relative-path issues.
-          docker compose -f docker-compose.yml run --rm --no-deps --timestamps --no-color agentbeats-client /app/scenario.toml /app/output/results.json
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps agentbeats-client /app/scenario.toml /app/output/results.json
 
       - name: "Post-run diagnostics (always)"
         if: always()
         run: |
           set +e
           echo "===== docker compose ps ====="
-          docker compose -f docker-compose.yml ps -a || true
+          docker compose --ansi never -f docker-compose.yml ps -a || true
           echo ""
           echo "===== logs (last 400 lines) ====="
-          docker compose -f docker-compose.yml logs --no-color --tail=400 || true
+          docker compose --ansi never -f docker-compose.yml logs --timestamps --tail=400 || true
 
       - name: "Show outputs (always)"
         if: always()
@@ -391,4 +539,4 @@ jobs:
       - name: "Cleanup (always)"
         if: always()
         run: |
-          docker compose -f docker-compose.yml down -v || true
+          docker compose --ansi never -f docker-compose.yml down -v || true
