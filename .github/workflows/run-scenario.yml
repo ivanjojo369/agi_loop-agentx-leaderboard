@@ -157,8 +157,10 @@ jobs:
 
           # Ensure mount of a2a-scenario.toml -> /app/scenario.toml
           vols = client.get("volumes") or []
-          vols2 = [v for v in vols if "/app/scenario.toml" not in str(v)]
+          # Drop any stale mounts to /app/scenario.toml or /app/output, then re-insert the known-good ones.
+          vols2 = [v for v in vols if "/app/scenario.toml" not in str(v) and "/app/output" not in str(v)]
           vols2.insert(0, "./a2a-scenario.toml:/app/scenario.toml:ro")
+          vols2.insert(1, "./output:/app/output")
           client["volumes"] = vols2
 
           # Make path resolution bulletproof (avoid reading some other scenario.toml in image)
@@ -281,8 +283,8 @@ jobs:
           set -euo pipefail
           docker compose --ansi never -f docker-compose.yml config > /tmp/compose.resolved.yml
 
-          echo "=== Resolved agentbeats-client mounts (grep scenario.toml) ==="
-          grep -n "scenario.toml" /tmp/compose.resolved.yml || true
+          echo "=== Resolved agentbeats-client mounts (grep -E 'scenario.toml|/app/output|output') ==="
+          grep -nE 'scenario.toml|/app/output' /tmp/compose.resolved.yml || true
 
           echo "=== Verify inside agentbeats-client container: /app/scenario.toml contains [green] endpoint ==="
           docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc             "set -e; test -s /app/scenario.toml; grep -n '^\[green\]' /app/scenario.toml; grep -n 'endpoint' /app/scenario.toml | head -n 20"
@@ -435,6 +437,15 @@ jobs:
           set -euo pipefail
           # Run client with explicit absolute-path args to avoid any WORKDIR/relative-path issues.
           docker compose --ansi never -f docker-compose.yml run --rm --no-deps agentbeats-client /app/scenario.toml /app/output/results.json
+
+      - name: "Post-assessment: show /app/output inside agentbeats-client (always)"
+        if: always()
+        run: |
+          set +e
+          echo "=== CONTAINER: /app/output listing ==="
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps -T --entrypoint sh agentbeats-client -lc 'ls -lah /app/output || true; echo "--- results.json (first 500 chars) ---"; test -f /app/output/results.json && head -c 500 /app/output/results.json || echo "missing"'
+          echo "=== HOST: ./output listing ==="
+          ls -lah output || true
 
       - name: "Post-run diagnostics (always)"
         if: always()
