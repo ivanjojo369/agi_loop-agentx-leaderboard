@@ -31,6 +31,9 @@ permissions:
 jobs:
   run:
     runs-on: [self-hosted, agentbeats]
+    defaults:
+      run:
+        shell: bash
     timeout-minutes: 60
 
     env:
