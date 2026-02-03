@@ -30,10 +30,43 @@ permissions:
 
 jobs:
   run:
-    runs-on: [self-hosted, agentbeats]
-    defaults:
-      run:
-        shell: '"C:\Program Files\Git\bin\bash.exe" --noprofile --norc -eo pipefail {0}'
+    runs-on: [self-hosted, windows, x64, agentbeats, docker]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: "Docker versions (bootstrap PATH + engine check)"
+         run: |
+          set -euo pipefail
+
+          echo "=== SHELL ==="
+          echo "$SHELL" || true
+
+          echo "=== PATH (bash) ==="
+          echo "$PATH"
+
+          # 1) Asegura docker en PATH (Docker Desktop default)
+          if ! command -v docker >/dev/null 2>&1; then
+            if [ -x "/c/Program Files/Docker/Docker/resources/bin/docker.exe" ]; then
+              export PATH="/c/Program Files/Docker/Docker/resources/bin:$PATH"
+            fi
+          fi
+
+          echo "=== docker location ==="
+          command -v docker || { echo "::error::docker not found in PATH for runner user"; exit 127; }
+
+          # 2) Versiones
+          docker --version
+          docker compose version
+
+          # 3) Contexto
+          docker context ls || true
+          docker context use desktop-linux || true
+          docker context show || true
+
+          # 4) Conectividad al engine
+          docker info
+
     timeout-minutes: 60
 
     env:
