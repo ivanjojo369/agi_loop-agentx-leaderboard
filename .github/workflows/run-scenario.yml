@@ -200,6 +200,7 @@ jobs:
               out.append("")
 
           out.append("[config]")
+          # Keep any config fields present, but ensure domain/num_tasks exist if you rely on leaderboard defaults.
           for k in sorted(config.keys()):
               v = config[k]
               if isinstance(v, bool):
@@ -237,6 +238,7 @@ jobs:
           doc = yaml.safe_load(p.read_text(encoding="utf-8"))
           services = doc.get("services") or {}
 
+          # Find the client service (prefer 'agentbeats-client', fallback to 'client')
           client_name = "agentbeats-client" if "agentbeats-client" in services else ("client" if "client" in services else None)
           if not client_name:
               raise SystemExit(f"docker-compose.yml missing agentbeats-client service. Found: {sorted(services.keys())}")
@@ -246,6 +248,7 @@ jobs:
           host_toml = abs_posix(Path("a2a-scenario.toml"))
           host_out  = abs_posix(Path("output"))
 
+          # Long-syntax bind mounts (Windows-safe)
           new_mounts = [
               {"type": "bind", "source": host_toml, "target": "/app/scenario.toml", "read_only": True},
               {"type": "bind", "source": host_out,  "target": "/app/output"},
@@ -257,6 +260,7 @@ jobs:
               if isinstance(v, dict):
                   return v.get("target") or ""
               if isinstance(v, str):
+                  # short syntax: host:container[:mode]
                   parts = v.split(":")
                   return parts[1] if len(parts) >= 2 else ""
               return ""
@@ -338,12 +342,13 @@ jobs:
 
       - name: Verify /app/scenario.toml inside container is the mounted TOML
         run: |
+          export MSYS_NO_PATHCONV=1
           set -euo pipefail
           docker compose --ansi never -f docker-compose.yml config > compose.resolved.yml || true
 
           echo "=== /app/scenario.toml preview inside client ==="
           docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc \
-            "set -e; test -s /app/scenario.toml; grep -n '^\[green\]' /app/scenario.toml; grep -n 'endpoint' /app/scenario.toml | head -n 60"
+            "set -e; test -s //app/scenario.toml; grep -n '^\[green\]' //app/scenario.toml; grep -n 'endpoint' //app/scenario.toml | head -n 60"
 
           python - <<'PY'
           import hashlib
@@ -375,6 +380,7 @@ jobs:
 
       - name: Assert /app/scenario.toml matches host a2a-scenario.toml
         run: |
+          export MSYS_NO_PATHCONV=1
           set -euo pipefail
           host_sha="$(python - <<'PY'
           import hashlib
@@ -382,7 +388,7 @@ jobs:
           print(hashlib.sha256(Path("a2a-scenario.toml").read_bytes()).hexdigest())
           PY
           )"
-          cont_sha="$(docker compose --ansi never -f docker-compose.yml run --rm --no-deps -T --entrypoint sh agentbeats-client -lc "sha256sum /app/scenario.toml | awk '{print \$1}'")"
+          cont_sha="$(docker compose --ansi never -f docker-compose.yml run --rm --no-deps -T --entrypoint sh agentbeats-client -lc "sha256sum //app/scenario.toml | awk '{print \$1}'")"
           echo "HOST: $host_sha"
           echo "CONT: $cont_sha"
           test "$host_sha" = "$cont_sha"
@@ -390,9 +396,10 @@ jobs:
       - name: Run assessment (agentbeats-client)
         id: assess
         run: |
+          export MSYS_NO_PATHCONV=1
           set -euo pipefail
           rm -f output/results.json || true
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps agentbeats-client /app/scenario.toml /app/output/results.json
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps agentbeats-client //app/scenario.toml //app/output/results.json
 
       - name: Post-run diagnostics (always)
         if: always()
