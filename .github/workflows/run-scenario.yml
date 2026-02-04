@@ -33,7 +33,7 @@ jobs:
     runs-on: [self-hosted, windows, x64, agentbeats, docker]
     timeout-minutes: 60
 
-    # Importante: todo corre en bash, PERO primero hacemos bootstrap en Windows PowerShell.
+    # After bootstrap, we'll run most commands in Git Bash.
     defaults:
       run:
         shell: bash
@@ -51,7 +51,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 1) Bootstrap PATH en Windows (NO pwsh; usamos Windows PowerShell)
+      # 1) Bootstrap PATH on Windows (NO pwsh). This guarantees bash + docker exist for next steps.
       - name: Bootstrap PATH (Git Bash + Docker) + identity
         shell: powershell
         run: |
@@ -61,6 +61,14 @@ jobs:
           whoami
           Write-Host "=== GROUPS (look for docker-users) ==="
           whoami /groups
+
+          Write-Host "=== Docker Desktop service ==="
+          $svc = Get-Service com.docker.service -ErrorAction SilentlyContinue
+          if ($svc) { $svc | Select Name,Status,StartType | Format-Table -Auto }
+          else { Write-Host "WARNING: com.docker.service not found (Docker Desktop not installed?)" }
+
+          Write-Host "=== Pipes (docker*) ==="
+          try { Get-ChildItem \\.\pipe\ | Where-Object Name -match 'docker' | Select Name } catch {}
 
           $gitCandidates = @(
             "C:\Program Files\Git\bin",
@@ -72,13 +80,11 @@ jobs:
           $gitDir = $gitCandidates | Where-Object { Test-Path (Join-Path $_ "bash.exe") } | Select-Object -First 1
           if (-not $gitDir) { throw "bash.exe not found. Install Git for Windows or fix PATH." }
 
-          # Para msys tools suele convenir también usr\bin si existe.
-          $usrDir = $gitDir -replace "\\bin$","\\usr\\bin"
-
+          # Ensure both bin and usr\bin are on PATH (usr\bin provides unix tools like sed/grep/sha256sum).
           Add-Content $env:GITHUB_PATH $gitDir
+          $usrDir = $gitDir -replace "\\bin$","\\usr\\bin"
           if (Test-Path (Join-Path $usrDir "bash.exe")) { Add-Content $env:GITHUB_PATH $usrDir }
 
-          # Docker Desktop CLI candidates
           $dockerCandidates = @(
             "C:\Program Files\Docker\Docker\resources\bin",
             "C:\ProgramData\DockerDesktop\version-bin"
@@ -90,9 +96,9 @@ jobs:
             Write-Host "WARNING: docker.exe not found in common locations (PATH may already include it)."
           }
 
-          Write-Host "Bootstrap done. Next steps should have bash + docker in PATH."
+          Write-Host "Bootstrap done. Next bash steps should find bash + docker."
 
-      # 2) Diagnóstico exacto del engine y PATH (ya en bash)
+      # 2) Docker engine check (this is the real gate)
       - name: Docker versions (PATH + engine check)
         run: |
           set -euxo pipefail
@@ -110,19 +116,22 @@ jobs:
 
           echo "=== docker context ==="
           docker context ls || true
-          docker context use desktop-linux || true
           docker context show || true
 
-          echo "=== docker engine connectivity (this is the real gate) ==="
-          docker version
-          docker info
+          echo "=== docker engine connectivity (retry up to ~60s) ==="
+          ok=0
+          for i in $(seq 1 30); do
+            if docker version && docker info; then ok=1; break; fi
+            sleep 2
+          done
+          test "$ok" = "1" || { echo "::error::Docker engine not reachable from runner user"; exit 1; }
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install small deps
+      - name: Install deps
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
@@ -137,7 +146,6 @@ jobs:
           test -f record_provenance.py
 
       - name: Generate docker-compose.yml from scenario
-        id: gen
         run: |
           set -euo pipefail
           python generate_compose.py --scenario "$SCENARIO_PATH"
@@ -215,7 +223,7 @@ jobs:
           echo "=== a2a-scenario.toml (head) ==="
           sed -n '1,180p' a2a-scenario.toml
 
-      - name: Patch docker-compose.yml for agentbeats-client (absolute binds + long syntax)
+      - name: Patch docker-compose.yml (bind absolute scenario/output into agentbeats-client)
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -229,9 +237,11 @@ jobs:
           doc = yaml.safe_load(p.read_text(encoding="utf-8"))
           services = doc.get("services") or {}
 
-          client = services.get("agentbeats-client")
-          if not client:
-              raise SystemExit("docker-compose.yml has no services.agentbeats-client")
+          client_name = "agentbeats-client" if "agentbeats-client" in services else ("client" if "client" in services else None)
+          if not client_name:
+              raise SystemExit(f"docker-compose.yml missing agentbeats-client service. Found: {sorted(services.keys())}")
+
+          client = services[client_name]
 
           host_toml = abs_posix(Path("a2a-scenario.toml"))
           host_out  = abs_posix(Path("output"))
@@ -255,12 +265,15 @@ jobs:
           client["volumes"] = new_mounts + kept
           client["working_dir"] = "/app"
 
-          services["agentbeats-client"] = client
+          services[client_name] = client
           doc["services"] = services
 
           p.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
-          print("Patched docker-compose.yml mounts for /app/scenario.toml + /app/output")
+          print(f"Patched docker-compose.yml mounts for {client_name}: /app/scenario.toml + /app/output")
           PY
+
+          echo "=== docker-compose.yml (head after patch) ==="
+          sed -n '1,260p' docker-compose.yml
 
       - name: Strict validate A2A TOML (green.endpoint + participants endpoints)
         run: |
@@ -285,7 +298,9 @@ jobs:
               raise SystemExit("participants (array) is required in A2A TOML")
 
           for i, p in enumerate(parts):
-              ep = (p or {}).get("endpoint")
+              if not isinstance(p, dict):
+                  raise SystemExit(f"participants[{i}] must be a table")
+              ep = p.get("endpoint")
               if not isinstance(ep, str) or not ep.strip():
                   raise SystemExit(f"participants[{i}].endpoint is required")
 
@@ -321,13 +336,21 @@ jobs:
               print("All requested secrets are present (values not shown).")
           PY
 
-      - name: Compose config (resolved) + verify /app/scenario.toml inside agentbeats-client
+      - name: Verify /app/scenario.toml inside container is the mounted TOML
         run: |
           set -euo pipefail
           docker compose --ansi never -f docker-compose.yml config > compose.resolved.yml || true
-          echo "=== verify container reads /app/scenario.toml ==="
+
+          echo "=== /app/scenario.toml preview inside client ==="
           docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc \
-            "set -e; test -s /app/scenario.toml; grep -n '^\[green\]' /app/scenario.toml; grep -n 'endpoint' /app/scenario.toml | head -n 50"
+            "set -e; test -s /app/scenario.toml; grep -n '^\[green\]' /app/scenario.toml; grep -n 'endpoint' /app/scenario.toml | head -n 60"
+
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          host = Path("a2a-scenario.toml").read_bytes()
+          print(hashlib.sha256(host).hexdigest())
+          PY
 
       - name: Pull images
         run: |
@@ -353,7 +376,12 @@ jobs:
       - name: Assert /app/scenario.toml matches host a2a-scenario.toml
         run: |
           set -euo pipefail
-          host_sha="$(sha256sum a2a-scenario.toml | awk '{print $1}')"
+          host_sha="$(python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          print(hashlib.sha256(Path("a2a-scenario.toml").read_bytes()).hexdigest())
+          PY
+          )"
           cont_sha="$(docker compose --ansi never -f docker-compose.yml run --rm --no-deps -T --entrypoint sh agentbeats-client -lc "sha256sum /app/scenario.toml | awk '{print \$1}'")"
           echo "HOST: $host_sha"
           echo "CONT: $cont_sha"
@@ -363,6 +391,7 @@ jobs:
         id: assess
         run: |
           set -euo pipefail
+          rm -f output/results.json || true
           docker compose --ansi never -f docker-compose.yml run --rm --no-deps agentbeats-client /app/scenario.toml /app/output/results.json
 
       - name: Post-run diagnostics (always)
@@ -407,37 +436,22 @@ jobs:
         if: always() && steps.assess.outcome != 'skipped'
         run: |
           set -euo pipefail
-          echo "has_results=$(python - <<'PY'
-          import json, pathlib
-          p = pathlib.Path("output/results.json")
-          if not p.exists():
-            print("false"); raise SystemExit(0)
-          try:
-            d = json.loads(p.read_text(encoding="utf-8"))
-          except Exception:
-            print("false"); raise SystemExit(0)
-          r = d.get("results")
-          print("true" if isinstance(r,list) and len(r)>0 else "false")
-          PY
-          )" >> "$GITHUB_OUTPUT"
+          test -s output/results.json
 
-          echo "results_count=$(python - <<'PY'
-          import json, pathlib
+          python - <<'PY'
+          import json, pathlib, sys
           p = pathlib.Path("output/results.json")
-          if not p.exists():
-            print(0); raise SystemExit(0)
-          try:
-            d = json.loads(p.read_text(encoding="utf-8"))
-          except Exception:
-            print(0); raise SystemExit(0)
+          d = json.loads(p.read_text(encoding="utf-8"))
           r = d.get("results")
-          print(len(r) if isinstance(r,list) else 0)
+          if not (isinstance(r, list) and len(r) > 0):
+              print("::error::results.json has no results[]")
+              sys.exit(2)
+          print("OK results_count =", len(r))
           PY
-          )" >> "$GITHUB_OUTPUT"
 
       - name: Generate submission metadata
         id: metadata
-        if: steps.validate.outputs.has_results == 'true'
+        if: steps.validate.outcome == 'success'
         run: |
           set -euo pipefail
           TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
@@ -447,7 +461,7 @@ jobs:
           echo "branch_name=submission-${UNIQUE_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Copy files to submission directory
-        if: steps.validate.outputs.has_results == 'true'
+        if: steps.metadata.outcome == 'success'
         run: |
           set -euo pipefail
           cp "$SCENARIO_PATH" "submissions/${{ steps.metadata.outputs.unique_name }}.toml"
@@ -457,14 +471,14 @@ jobs:
           fi
 
       - name: Create submission branch from origin/main
-        if: steps.validate.outputs.has_results == 'true'
+        if: steps.metadata.outcome == 'success'
         run: |
           set -euo pipefail
           git fetch origin
           git checkout -b "${{ steps.metadata.outputs.branch_name }}" origin/main
 
       - name: Commit results and push branch
-        if: steps.validate.outputs.has_results == 'true'
+        if: steps.metadata.outcome == 'success'
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -477,16 +491,6 @@ jobs:
           git push origin "${{ steps.metadata.outputs.branch_name }}"
           echo "::notice title=Submission Branch Created::Branch: ${{ steps.metadata.outputs.branch_name }}"
 
-      - name: Fail run if results are empty
-        if: always() && steps.assess.outcome != 'skipped'
-        run: |
-          set -euo pipefail
-          if [ "${{ steps.validate.outputs.has_results }}" != "true" ]; then
-            echo "::error::output/results.json is missing or has empty results[]. No submission branch/PR was created."
-            exit 1
-          fi
-
-      # Cleanup robusto: no tumba el job si docker no está / engine no responde
       - name: Cleanup (always, best-effort)
         if: always()
         continue-on-error: true
