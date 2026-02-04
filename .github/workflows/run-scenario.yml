@@ -33,7 +33,7 @@ jobs:
     runs-on: [self-hosted, windows, x64, agentbeats, docker]
     timeout-minutes: 60
 
-    # Importante: usamos bash como default, pero primero “bootstrap” en pwsh para garantizar que bash exista.
+    # Importante: todo corre en bash, PERO primero hacemos bootstrap en Windows PowerShell.
     defaults:
       run:
         shell: bash
@@ -51,11 +51,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 1) Bootstrap PATH en Windows (antes de cualquier step en bash)
-      - name: Bootstrap PATH (Git Bash + Docker)
-        shell: pwsh
+      # 1) Bootstrap PATH en Windows (NO pwsh; usamos Windows PowerShell)
+      - name: Bootstrap PATH (Git Bash + Docker) + identity
+        shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
+
+          Write-Host "=== IDENTITY ==="
+          whoami
+          Write-Host "=== GROUPS (look for docker-users) ==="
+          whoami /groups
 
           $gitCandidates = @(
             "C:\Program Files\Git\bin",
@@ -63,36 +68,53 @@ jobs:
             "C:\Program Files (x86)\Git\bin",
             "C:\Program Files (x86)\Git\usr\bin"
           )
+
           $gitDir = $gitCandidates | Where-Object { Test-Path (Join-Path $_ "bash.exe") } | Select-Object -First 1
           if (-not $gitDir) { throw "bash.exe not found. Install Git for Windows or fix PATH." }
-          Add-Content $env:GITHUB_PATH $gitDir
 
-          $dockerDir = "C:\Program Files\Docker\Docker\resources\bin"
-          if (Test-Path (Join-Path $dockerDir "docker.exe")) {
+          # Para msys tools suele convenir también usr\bin si existe.
+          $usrDir = $gitDir -replace "\\bin$","\\usr\\bin"
+
+          Add-Content $env:GITHUB_PATH $gitDir
+          if (Test-Path (Join-Path $usrDir "bash.exe")) { Add-Content $env:GITHUB_PATH $usrDir }
+
+          # Docker Desktop CLI candidates
+          $dockerCandidates = @(
+            "C:\Program Files\Docker\Docker\resources\bin",
+            "C:\ProgramData\DockerDesktop\version-bin"
+          )
+          $dockerDir = $dockerCandidates | Where-Object { Test-Path (Join-Path $_ "docker.exe") } | Select-Object -First 1
+          if ($dockerDir) {
             Add-Content $env:GITHUB_PATH $dockerDir
           } else {
-            Write-Host "WARNING: docker.exe not found at $dockerDir (PATH may already include it)."
+            Write-Host "WARNING: docker.exe not found in common locations (PATH may already include it)."
           }
 
-          Write-Host "Bootstrap done. bash + docker will be available from next steps."
+          Write-Host "Bootstrap done. Next steps should have bash + docker in PATH."
 
+      # 2) Diagnóstico exacto del engine y PATH (ya en bash)
       - name: Docker versions (PATH + engine check)
         run: |
-          set -euo pipefail
+          set -euxo pipefail
+          echo "=== PATH (bash) ==="
+          echo "$PATH"
+
           echo "=== bash ==="
           command -v bash
           bash --version | head -n 2 || true
 
           echo "=== docker ==="
-          command -v docker
+          command -v docker || { echo "::error::docker not found in PATH for runner user"; exit 127; }
           docker --version
-          docker compose version
+          docker compose version || true
 
+          echo "=== docker context ==="
           docker context ls || true
           docker context use desktop-linux || true
           docker context show || true
 
-          # esto valida permisos/daemon
+          echo "=== docker engine connectivity (this is the real gate) ==="
+          docker version
           docker info
 
       - name: Set up Python
@@ -115,6 +137,7 @@ jobs:
           test -f record_provenance.py
 
       - name: Generate docker-compose.yml from scenario
+        id: gen
         run: |
           set -euo pipefail
           python generate_compose.py --scenario "$SCENARIO_PATH"
@@ -231,6 +254,7 @@ jobs:
           kept = [v for v in old if target_of(v) not in ("/app/scenario.toml", "/app/output")]
           client["volumes"] = new_mounts + kept
           client["working_dir"] = "/app"
+
           services["agentbeats-client"] = client
           doc["services"] = services
 
@@ -346,8 +370,8 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          docker compose --ansi never -f docker-compose.yml ps -a
-          docker compose --ansi never -f docker-compose.yml logs --tail=300
+          docker compose --ansi never -f docker-compose.yml ps -a || true
+          docker compose --ansi never -f docker-compose.yml logs --tail=300 || true
 
       - name: Show outputs (always)
         if: always()
@@ -363,7 +387,7 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          python record_provenance.py --compose docker-compose.yml --output output/provenance.json
+          python record_provenance.py --compose docker-compose.yml --output output/provenance.json || true
 
       - name: Upload debug artifacts (always)
         if: always()
@@ -378,7 +402,100 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Cleanup (always)
+      - name: Validate results.json is NON-empty
+        id: validate
+        if: always() && steps.assess.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          echo "has_results=$(python - <<'PY'
+          import json, pathlib
+          p = pathlib.Path("output/results.json")
+          if not p.exists():
+            print("false"); raise SystemExit(0)
+          try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+          except Exception:
+            print("false"); raise SystemExit(0)
+          r = d.get("results")
+          print("true" if isinstance(r,list) and len(r)>0 else "false")
+          PY
+          )" >> "$GITHUB_OUTPUT"
+
+          echo "results_count=$(python - <<'PY'
+          import json, pathlib
+          p = pathlib.Path("output/results.json")
+          if not p.exists():
+            print(0); raise SystemExit(0)
+          try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+          except Exception:
+            print(0); raise SystemExit(0)
+          r = d.get("results")
+          print(len(r) if isinstance(r,list) else 0)
+          PY
+          )" >> "$GITHUB_OUTPUT"
+
+      - name: Generate submission metadata
+        id: metadata
+        if: steps.validate.outputs.has_results == 'true'
+        run: |
+          set -euo pipefail
+          TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+          USERNAME="${{ github.repository_owner }}"
+          UNIQUE_NAME="${USERNAME}-${TIMESTAMP}"
+          echo "unique_name=$UNIQUE_NAME" >> "$GITHUB_OUTPUT"
+          echo "branch_name=submission-${UNIQUE_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Copy files to submission directory
+        if: steps.validate.outputs.has_results == 'true'
+        run: |
+          set -euo pipefail
+          cp "$SCENARIO_PATH" "submissions/${{ steps.metadata.outputs.unique_name }}.toml"
+          cp output/results.json "results/${{ steps.metadata.outputs.unique_name }}.json"
+          if [ -f output/provenance.json ]; then
+            cp output/provenance.json "submissions/${{ steps.metadata.outputs.unique_name }}.provenance.json"
+          fi
+
+      - name: Create submission branch from origin/main
+        if: steps.validate.outputs.has_results == 'true'
+        run: |
+          set -euo pipefail
+          git fetch origin
+          git checkout -b "${{ steps.metadata.outputs.branch_name }}" origin/main
+
+      - name: Commit results and push branch
+        if: steps.validate.outputs.has_results == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "submissions/${{ steps.metadata.outputs.unique_name }}.toml" "results/${{ steps.metadata.outputs.unique_name }}.json" || true
+          if [ -f "submissions/${{ steps.metadata.outputs.unique_name }}.provenance.json" ]; then
+            git add "submissions/${{ steps.metadata.outputs.unique_name }}.provenance.json"
+          fi
+          git commit -m "Submission: ${{ steps.metadata.outputs.unique_name }}" || echo "Nothing to commit"
+          git push origin "${{ steps.metadata.outputs.branch_name }}"
+          echo "::notice title=Submission Branch Created::Branch: ${{ steps.metadata.outputs.branch_name }}"
+
+      - name: Fail run if results are empty
+        if: always() && steps.assess.outcome != 'skipped'
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.validate.outputs.has_results }}" != "true" ]; then
+            echo "::error::output/results.json is missing or has empty results[]. No submission branch/PR was created."
+            exit 1
+          fi
+
+      # Cleanup robusto: no tumba el job si docker no está / engine no responde
+      - name: Cleanup (always, best-effort)
         if: always()
         continue-on-error: true
-        run: docker compose --ansi never -f docker-compose.yml down -v
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Continue"
+          $docker = Get-Command docker -ErrorAction SilentlyContinue
+          if (-not $docker) {
+            Write-Host "docker not found; skipping cleanup."
+            exit 0
+          }
+          docker compose --ansi never -f docker-compose.yml down -v
