@@ -412,54 +412,34 @@ jobs:
           set -euo pipefail
           rm -f output/results.json || true
 
+          echo "=== Compose service definition (agentbeats-client) ==="
+          docker compose --ansi never -f docker-compose.yml config | sed -n '1,240p'
+
+          echo "=== Preflight: list TOMLs inside container ==="
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc             "set -euo pipefail; pwd; ls -la /app; find /app -maxdepth 4 -name '*.toml' -print | sed -n '1,80p'"
+
           echo "=== Preflight: show /app/scenario.toml inside container (first 240 lines) ==="
           docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc             "set -euo pipefail; test -s /app/scenario.toml; sed -n '1,240p' /app/scenario.toml"
 
-          echo "=== Preflight: validate green.endpoint inside container ==="
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint python agentbeats-client -c             'import tomllib, pathlib; d=tomllib.loads(pathlib.Path("/app/scenario.toml").read_text(encoding="utf-8")); g=d.get("green"); assert isinstance(g, dict) and g.get("endpoint"), "MISSING green.endpoint in /app/scenario.toml"; print("OK green.endpoint =", g["endpoint"])'
+          echo "=== Preflight: validate green.endpoint via tomllib (raw) ==="
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint python agentbeats-client -c             'import tomllib, pathlib; d=tomllib.loads(pathlib.Path("/app/scenario.toml").read_text(encoding="utf-8")); g=d.get("green"); print("keys=", list(d.keys())); print("green=", g); assert isinstance(g, dict) and g.get("endpoint"), "MISSING green.endpoint in /app/scenario.toml"; print("OK green.endpoint =", g["endpoint"])'
 
-          echo "=== Run agentbeats-client explicitly ==="
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps agentbeats-client /app/scenario.toml /app/output/results.json
-      - name: Post-run diagnostics (always)
-        if: always()
-        continue-on-error: true
-        run: |
-          set +e
-          docker compose --ansi never -f docker-compose.yml ps -a || true
-          docker compose --ansi never -f docker-compose.yml logs --tail=300 || true
+          echo "=== Preflight: validate using agentbeats.client_cli.parse_toml (exact same code path) ==="
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint python agentbeats-client -c             "import tomllib,pathlib; from agentbeats.client_cli import parse_toml; d=tomllib.loads(pathlib.Path('/app/scenario.toml').read_text(encoding='utf-8')); print('green=', d.get('green')); req, green_url, role_to_id = parse_toml(d); print('parse_toml OK'); print('green_url=', green_url); print('roles=', list(role_to_id.keys()))"
 
-      - name: Show outputs (always)
-        if: always()
-        continue-on-error: true
-        run: |
-          set +e
-          echo "=== output/ ==="
-          ls -lah output || true
-          echo "=== output/results.json (first 2000 chars) ==="
-          if [ -f output/results.json ]; then head -c 2000 output/results.json; echo; else echo "missing"; fi
+          echo "=== Preflight: show agentbeats-client help (to confirm CLI args) ==="
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc             "set -euo pipefail; agentbeats-client -h || true"
 
-      - name: Record provenance (always)
-        if: always()
-        continue-on-error: true
-        run: |
-          python record_provenance.py --compose docker-compose.yml --output output/provenance.json || true
+          echo "=== Run agentbeats-client via python -m (bypass any wrapper ignoring args) ==="
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc             "set -euo pipefail; export PYTHONPATH=/app/src:\$PYTHONPATH; python -m agentbeats.client_cli /app/scenario.toml /app/output/results.json"
 
-      - name: Upload debug artifacts (always)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: run-scenario-debug
-          path: |
-            docker-compose.yml
-            compose.resolved.yml
-            a2a-scenario.toml
-            output/**
-          if-no-files-found: warn
-          retention-days: 7
+          echo "=== Check outputs inside container ==="
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc             "set -euo pipefail; ls -la /app/output || true; test -s /app/output/results.json; echo 'results.json size:'; wc -c /app/output/results.json"
+
 
       - name: Validate results.json is NON-empty
         id: validate
-        if: always() && steps.assess.outcome != 'skipped'
+        if: steps.assess.outcome == 'success'
         run: |
           set -euo pipefail
           test -s output/results.json
