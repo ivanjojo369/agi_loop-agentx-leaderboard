@@ -118,10 +118,17 @@ jobs:
           docker context ls || true
           docker context show || true
 
+          echo "=== force Docker endpoint to docker_engine (robust on Windows) ==="
+          echo "DOCKER_HOST=npipe:////./pipe/docker_engine" >> "$GITHUB_ENV"
+          echo "DOCKER_CONTEXT=default" >> "$GITHUB_ENV"
+          export DOCKER_HOST="npipe:////./pipe/docker_engine"
+          docker context use default || true
+          docker context show || true
+
           echo "=== docker engine connectivity (retry up to ~60s) ==="
           ok=0
           for i in $(seq 1 30); do
-            if docker version && docker info; then ok=1; break; fi
+            if docker -H "$DOCKER_HOST" version && docker -H "$DOCKER_HOST" info; then ok=1; break; fi
             sleep 2
           done
           test "$ok" = "1" || { echo "::error::Docker engine not reachable from runner user"; exit 1; }
