@@ -408,39 +408,48 @@ jobs:
           test "$host_sha" = "$cont_sha"
 
       - name: Run assessment (agentbeats-client)
-        id: assess
-        shell: bash
-        run: |
-          export MSYS_NO_PATHCONV=1
-          set -euo pipefail
-          rm -f output/results.json || true
+  id: assess
+  shell: bash
+  run: |
+    export MSYS_NO_PATHCONV=1
+    set -euo pipefail
+    rm -f output/results.json || true
 
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps \
-           --entrypoint sh agentbeats-client -lc '
-             set -euo pipefail
+    docker compose --ansi never -f docker-compose.yml run --rm --no-deps \
+      --entrypoint sh agentbeats-client -lc "
+        set -euo pipefail
 
-             echo "=== Using /app/scenario.toml (forced) ==="
-             python -c "import hashlib,pathlib; p=pathlib.Path(\"/app/scenario.toml\"); b=p.read_bytes(); print(\"sha256\", hashlib.sha256(b).hexdigest());"
+        echo '=== Using /app/scenario.toml (forced) ==='
+        python - <<'PY'
+    import hashlib, pathlib
+    p = pathlib.Path('/app/scenario.toml')
+    b = p.read_bytes()
+    print('sha256', hashlib.sha256(b).hexdigest())
+    PY
 
-             echo "=== First 260 lines of /app/scenario.toml ==="
-             sed -n "1,260p" /app/scenario.toml
+        echo '=== First 260 lines of /app/scenario.toml ==='
+        sed -n '1,260p' /app/scenario.toml
 
-             export PYTHONPATH=/app/src
-             python -m venv /app/output/.venv
-             . /app/output/.venv/bin/activate
-             python -m ensurepip --upgrade || true
-             python -c "import httpx" 2>/dev/null || uv pip install httpx
-             python -m agentbeats.client_cli /app/scenario.toml /app/output/results.json
+        export PYTHONPATH=/app/src:\$PYTHONPATH
 
-             python - << 'PY'
-             import json, pathlib
-             p = pathlib.Path("/app/output/results.json")
-             assert p.exists() and p.stat().st_size > 0, "results.json missing/empty"
-             d = json.loads(p.read_text())
-             r = d.get("results", [])
-             print("results.len =", len(r))
-             assert isinstance(r, list) and len(r) > 0, "results[] is empty"
-             PY
+        python -m venv /app/output/.venv
+        . /app/output/.venv/bin/activate
+        python -m ensurepip --upgrade || true
+
+        python -c 'import httpx' 2>/dev/null || uv pip install httpx
+
+        python -m agentbeats.client_cli /app/scenario.toml /app/output/results.json
+
+        python - <<'PY'
+    import json, pathlib
+    p = pathlib.Path('/app/output/results.json')
+    assert p.exists() and p.stat().st_size > 0, 'results.json missing/empty'
+    d = json.loads(p.read_text())
+    r = d.get('results', [])
+    print('results.len =', len(r))
+    assert isinstance(r, list) and len(r) > 0, 'results[] is empty'
+    PY
+      "
 
       - name: Post-run diagnostics (always)
         if: always()
