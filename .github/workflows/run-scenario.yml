@@ -426,14 +426,21 @@ jobs:
              sed -n "1,260p" /app/scenario.toml
 
              export PYTHONPATH=/app/src
-             export PATH="$HOME/.local/bin:$PATH"
-
-             # Install missing deps into user site (no root needed)
-             python -c "import httpx" 2>/dev/null || uv pip install --user httpx
-
-             # Run client explicitly against the mounted file
+             python -m venv /app/output/.venv
+             . /app/output/.venv/bin/activate
+             python -m ensurepip --upgrade || true
+             python -c "import httpx" 2>/dev/null || uv pip install httpx
              python -m agentbeats.client_cli /app/scenario.toml /app/output/results.json
-           '
+
+             python - << 'PY'
+             import json, pathlib
+             p = pathlib.Path("/app/output/results.json")
+             assert p.exists() and p.stat().st_size > 0, "results.json missing/empty"
+             d = json.loads(p.read_text())
+             r = d.get("results", [])
+             print("results.len =", len(r))
+             assert isinstance(r, list) and len(r) > 0, "results[] is empty"
+             PY
 
       - name: Post-run diagnostics (always)
         if: always()
