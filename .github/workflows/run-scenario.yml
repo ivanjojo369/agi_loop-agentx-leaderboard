@@ -44,6 +44,7 @@ jobs:
       A2A_PORT: "9009"
       DOCKER_BUILDKIT: "0"
       COMPOSE_DOCKER_CLI_BUILD: "0"
+      MSYS_NO_PATHCONV: "1"
 
     steps:
       - name: Checkout
@@ -114,24 +115,27 @@ jobs:
           docker --version
           docker compose version || true
 
-          echo "=== docker context ==="
+          echo "=== docker context (before) ==="
           docker context ls || true
           docker context show || true
 
-          echo "=== force Docker endpoint to docker_engine (robust on Windows) ==="
-          echo "DOCKER_HOST=npipe:////./pipe/docker_engine" >> "$GITHUB_ENV"
-          echo "DOCKER_CONTEXT=default" >> "$GITHUB_ENV"
-          export DOCKER_HOST="npipe:////./pipe/docker_engine"
+          echo "=== force DOCKER_HOST to Windows pipe docker_engine (robust) ==="
           docker context use default || true
-          docker context show || true
+          export DOCKER_HOST="npipe:////./pipe/docker_engine"
+          echo "DOCKER_HOST=$DOCKER_HOST" >> "$GITHUB_ENV"
 
-          echo "=== docker engine connectivity (retry up to ~60s) ==="
+          echo "=== docker engine connectivity via $DOCKER_HOST (retry up to ~60s) ==="
           ok=0
           for i in $(seq 1 30); do
             if docker -H "$DOCKER_HOST" version && docker -H "$DOCKER_HOST" info; then ok=1; break; fi
             sleep 2
           done
-          test "$ok" = "1" || { echo "::error::Docker engine not reachable from runner user"; exit 1; }
+          test "$ok" = "1" || { echo "::error::Docker engine not reachable via $DOCKER_HOST"; exit 1; }
+
+          echo "=== docker context (after) ==="
+          docker context ls || true
+          docker context show || true
+
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -267,20 +271,17 @@ jobs:
               if isinstance(v, dict):
                   return v.get("target") or ""
               if isinstance(v, str):
-                  # Windows-safe parsing for short syntax:
-                  #   C:/path/file:/container/path:ro
-                  parts = v.rsplit(":", 2)  # [src, tgt, mode] or [src, tgt]
+                  # short syntax: host:container[:mode]
+                  parts = v.rsplit(":", 2)
                   if len(parts) == 3:
-                      return parts[1]
+                       return parts[1]
                   parts = v.rsplit(":", 1)
                   if len(parts) == 2:
-                      return parts[1]
+                       return parts[1]
+                  return ""
               return ""
 
-          # Remove ANY previous mount that targets /app/scenario.toml or /app/output
           kept = [v for v in old if target_of(v) not in ("/app/scenario.toml", "/app/output")]
-
-          # IMPORTANT: append our mounts LAST so they win if something else also targets /app/*
           client["volumes"] = kept + new_mounts
           client["working_dir"] = "/app"
 
@@ -288,11 +289,12 @@ jobs:
           doc["services"] = services
 
           p.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
-          print(f"Patched docker-compose.yml mounts for {client_name}: /app/scenario.toml + /app/output (Windows-safe)")
+          print(f"Patched docker-compose.yml mounts for {client_name}: /app/scenario.toml + /app/output")
           PY
 
           echo "=== docker-compose.yml (head after patch) ==="
           sed -n '1,260p' docker-compose.yml
+
       - name: Strict validate A2A TOML (green.endpoint + participants endpoints)
         run: |
           set -euo pipefail
@@ -360,22 +362,15 @@ jobs:
           set -euo pipefail
           docker compose --ansi never -f docker-compose.yml config > compose.resolved.yml || true
 
-          echo "=== /app/scenario.toml (first 220 lines, inside client container) ==="
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc             "set -euo pipefail; test -s /app/scenario.toml; sed -n '1,220p' /app/scenario.toml"
+          echo "=== /app/scenario.toml (first 240 lines) inside agentbeats-client ==="
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc \
+            "set -eux; test -s /app/scenario.toml; sed -n '1,240p' /app/scenario.toml"
 
-          echo "=== Validate green.endpoint inside container ==="
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint python agentbeats-client -c             'import tomllib, pathlib; d=tomllib.loads(pathlib.Path("/app/scenario.toml").read_text(encoding="utf-8")); g=d.get("green"); print("TOP-LEVEL:", list(d.keys())); print("green:", g); assert isinstance(g, dict) and g.get("endpoint"), "MISSING green.endpoint in /app/scenario.toml"; print("OK green.endpoint =", g["endpoint"])'
+          echo "=== Validate /app/scenario.toml keys (tomllib) inside agentbeats-client ==="
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint python agentbeats-client -c \
+            "import tomllib, pathlib; d=tomllib.loads(pathlib.Path('/app/scenario.toml').read_text()); g=d.get('green'); assert isinstance(g, dict) and g.get('endpoint'), 'missing green.endpoint'; parts=d.get('participants'); assert isinstance(parts, list) and len(parts)>0, 'missing participants'; print('OK green.endpoint =', g['endpoint']); print('OK participants =', [p.get('endpoint') for p in parts])"
 
-          echo "=== SHA256 host a2a-scenario.toml ==="
-          python - <<'PY'
-          import hashlib
-          from pathlib import Path
-          host = Path("a2a-scenario.toml").read_bytes()
-          print(hashlib.sha256(host).hexdigest())
-          PY
 
-          echo "=== SHA256 container /app/scenario.toml ==="
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint python agentbeats-client -c             'import hashlib, pathlib; b=pathlib.Path("/app/scenario.toml").read_bytes(); print(hashlib.sha256(b).hexdigest())'
       - name: Pull images
         run: |
           set -euo pipefail
@@ -418,31 +413,44 @@ jobs:
           export MSYS_NO_PATHCONV=1
           set -euo pipefail
           rm -f output/results.json || true
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps agentbeats-client /app/scenario.toml /app/output/results.json
 
-          echo "=== Compose service definition (agentbeats-client) ==="
-          docker compose --ansi never -f docker-compose.yml config | sed -n '1,240p'
+      - name: Post-run diagnostics (always)
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          docker compose --ansi never -f docker-compose.yml ps -a || true
+          docker compose --ansi never -f docker-compose.yml logs --tail=300 || true
 
-          echo "=== Preflight: list TOMLs inside container ==="
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc             "set -euo pipefail; pwd; ls -la /app; find /app -maxdepth 4 -name '*.toml' -print | sed -n '1,80p'"
+      - name: Show outputs (always)
+        if: always()
+        continue-on-error: true
+        run: |
+          set +e
+          echo "=== output/ ==="
+          ls -lah output || true
+          echo "=== output/results.json (first 2000 chars) ==="
+          if [ -f output/results.json ]; then head -c 2000 output/results.json; echo; else echo "missing"; fi
 
-          echo "=== Preflight: show /app/scenario.toml inside container (first 240 lines) ==="
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc             "set -euo pipefail; test -s /app/scenario.toml; sed -n '1,240p' /app/scenario.toml"
+      - name: Record provenance (always)
+        if: always()
+        continue-on-error: true
+        run: |
+          python record_provenance.py --compose docker-compose.yml --output output/provenance.json || true
 
-          echo "=== Preflight: validate green.endpoint via tomllib (raw) ==="
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint python agentbeats-client -c             'import tomllib, pathlib; d=tomllib.loads(pathlib.Path("/app/scenario.toml").read_text(encoding="utf-8")); g=d.get("green"); print("keys=", list(d.keys())); print("green=", g); assert isinstance(g, dict) and g.get("endpoint"), "MISSING green.endpoint in /app/scenario.toml"; print("OK green.endpoint =", g["endpoint"])'
-
-          echo "=== Preflight: validate using agentbeats.client_cli.parse_toml (exact same code path) ==="
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint python agentbeats-client -c             "import tomllib,pathlib; from agentbeats.client_cli import parse_toml; d=tomllib.loads(pathlib.Path('/app/scenario.toml').read_text(encoding='utf-8')); print('green=', d.get('green')); req, green_url, role_to_id = parse_toml(d); print('parse_toml OK'); print('green_url=', green_url); print('roles=', list(role_to_id.keys()))"
-
-          echo "=== Preflight: show agentbeats-client help (to confirm CLI args) ==="
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc             "set -euo pipefail; agentbeats-client -h || true"
-
-          echo "=== Run agentbeats-client via python -m (bypass any wrapper ignoring args) ==="
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc             "set -euo pipefail; export PYTHONPATH=/app/src:\$PYTHONPATH; python -m agentbeats.client_cli /app/scenario.toml /app/output/results.json"
-
-          echo "=== Check outputs inside container ==="
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc             "set -euo pipefail; ls -la /app/output || true; test -s /app/output/results.json; echo 'results.json size:'; wc -c /app/output/results.json"
-
+      - name: Upload debug artifacts (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-scenario-debug
+          path: |
+            docker-compose.yml
+            compose.resolved.yml
+            a2a-scenario.toml
+            output/**
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Validate results.json is NON-empty
         id: validate
