@@ -44,7 +44,6 @@ jobs:
       A2A_PORT: "9009"
       DOCKER_BUILDKIT: "0"
       COMPOSE_DOCKER_CLI_BUILD: "0"
-      MSYS_NO_PATHCONV: "1"
 
     steps:
       - name: Checkout
@@ -115,27 +114,17 @@ jobs:
           docker --version
           docker compose version || true
 
-          echo "=== docker context (before) ==="
+          echo "=== docker context ==="
           docker context ls || true
           docker context show || true
 
-          echo "=== force DOCKER_HOST to Windows pipe docker_engine (robust) ==="
-          docker context use default || true
-          export DOCKER_HOST="npipe:////./pipe/docker_engine"
-          echo "DOCKER_HOST=$DOCKER_HOST" >> "$GITHUB_ENV"
-
-          echo "=== docker engine connectivity via $DOCKER_HOST (retry up to ~60s) ==="
+          echo "=== docker engine connectivity (retry up to ~60s) ==="
           ok=0
           for i in $(seq 1 30); do
-            if docker -H "$DOCKER_HOST" version && docker -H "$DOCKER_HOST" info; then ok=1; break; fi
+            if docker version && docker info; then ok=1; break; fi
             sleep 2
           done
-          test "$ok" = "1" || { echo "::error::Docker engine not reachable via $DOCKER_HOST"; exit 1; }
-
-          echo "=== docker context (after) ==="
-          docker context ls || true
-          docker context show || true
-
+          test "$ok" = "1" || { echo "::error::Docker engine not reachable from runner user"; exit 1; }
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -272,13 +261,8 @@ jobs:
                   return v.get("target") or ""
               if isinstance(v, str):
                   # short syntax: host:container[:mode]
-                  parts = v.rsplit(":", 2)
-                  if len(parts) == 3:
-                       return parts[1]
-                  parts = v.rsplit(":", 1)
-                  if len(parts) == 2:
-                       return parts[1]
-                  return ""
+                  parts = v.split(":")
+                  return parts[1] if len(parts) >= 2 else ""
               return ""
 
           kept = [v for v in old if target_of(v) not in ("/app/scenario.toml", "/app/output")]
@@ -363,13 +347,10 @@ jobs:
           docker compose --ansi never -f docker-compose.yml config > compose.resolved.yml || true
 
           echo "=== /app/scenario.toml (first 240 lines) inside agentbeats-client ==="
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc \
-            "set -eux; test -s /app/scenario.toml; sed -n '1,240p' /app/scenario.toml"
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc             "set -eux; test -s /app/scenario.toml; sed -n '1,240p' /app/scenario.toml"
 
           echo "=== Validate /app/scenario.toml keys (tomllib) inside agentbeats-client ==="
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint python agentbeats-client -c \
-            "import tomllib, pathlib; d=tomllib.loads(pathlib.Path('/app/scenario.toml').read_text()); g=d.get('green'); assert isinstance(g, dict) and g.get('endpoint'), 'missing green.endpoint'; parts=d.get('participants'); assert isinstance(parts, list) and len(parts)>0, 'missing participants'; print('OK green.endpoint =', g['endpoint']); print('OK participants =', [p.get('endpoint') for p in parts])"
-
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint python agentbeats-client -c             "import tomllib, pathlib; d=tomllib.loads(pathlib.Path('/app/scenario.toml').read_text()); g=d.get('green'); assert isinstance(g, dict) and g.get('endpoint'), 'missing green.endpoint'; parts=d.get('participants'); assert isinstance(parts, list) and len(parts)>0, 'missing participants'; print('OK green.endpoint =', g['endpoint']); print('OK participants =', [p.get('endpoint') for p in parts])"
 
       - name: Pull images
         run: |
@@ -408,48 +389,64 @@ jobs:
           test "$host_sha" = "$cont_sha"
 
       - name: Run assessment (agentbeats-client)
-  id: assess
-  shell: bash
-  run: |
-    export MSYS_NO_PATHCONV=1
-    set -euo pipefail
-    rm -f output/results.json || true
+        id: assess
+        run: |
+          export MSYS_NO_PATHCONV=1
+          set -euo pipefail
+          rm -f output/results.json || true
 
-    docker compose --ansi never -f docker-compose.yml run --rm --no-deps \
-      --entrypoint sh agentbeats-client -lc "
-        set -euo pipefail
+          # Defensive: wait for agent containers to be healthy (compose healthchecks)
+          for svc in attacker defender green-agent; do
+            echo "=== Waiting for $svc to be healthy ==="
+            ok=0
+            for i in $(seq 1 60); do
+              st="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}nohealth{{end}}' "$svc" 2>/dev/null || echo missing)"
+              echo "  $svc: $st"
+              if [ "$st" = "healthy" ]; then ok=1; break; fi
+              sleep 2
+            done
+            test "$ok" = "1" || { echo "::error::$svc not healthy"; docker logs --tail=200 "$svc" || true; exit 1; }
+          done
 
-        echo '=== Using /app/scenario.toml (forced) ==='
-        python - <<'PY'
-    import hashlib, pathlib
-    p = pathlib.Path('/app/scenario.toml')
-    b = p.read_bytes()
-    print('sha256', hashlib.sha256(b).hexdigest())
-    PY
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps -T \
+            --entrypoint sh agentbeats-client -lc "
+              set -euo pipefail
 
-        echo '=== First 260 lines of /app/scenario.toml ==='
-        sed -n '1,260p' /app/scenario.toml
+              echo '=== Using /app/scenario.toml (forced) ==='
+              python - <<'PY'
+              import hashlib, pathlib
+              p = pathlib.Path('/app/scenario.toml')
+              b = p.read_bytes()
+              print('sha256', hashlib.sha256(b).hexdigest())
+              PY
 
-        export PYTHONPATH=/app/src:\$PYTHONPATH
+              echo '=== First 260 lines of /app/scenario.toml ==='
+              sed -n '1,260p' /app/scenario.toml
 
-        python -m venv /app/output/.venv
-        . /app/output/.venv/bin/activate
-        python -m ensurepip --upgrade || true
+              export PYTHONPATH=/app/src:\$PYTHONPATH
 
-        python -c 'import httpx' 2>/dev/null || uv pip install httpx
+              python -m venv /tmp/ab-venv
+              . /tmp/ab-venv/bin/activate
+              python -m ensurepip --upgrade || true
+              python -m pip install -q --upgrade pip wheel setuptools
+              python -c 'import httpx' 2>/dev/null || python -m pip install -q httpx
 
-        python -m agentbeats.client_cli /app/scenario.toml /app/output/results.json
+              python -m agentbeats.client_cli /app/scenario.toml /app/output/results.json
 
-        python - <<'PY'
-    import json, pathlib
-    p = pathlib.Path('/app/output/results.json')
-    assert p.exists() and p.stat().st_size > 0, 'results.json missing/empty'
-    d = json.loads(p.read_text())
-    r = d.get('results', [])
-    print('results.len =', len(r))
-    assert isinstance(r, list) and len(r) > 0, 'results[] is empty'
-    PY
-      "
+              python - <<'PY'
+              import json, pathlib, sys
+              p = pathlib.Path('/app/output/results.json')
+              if not (p.exists() and p.stat().st_size > 0):
+                  print('::error::results.json missing/empty')
+                  sys.exit(2)
+              d = json.loads(p.read_text(encoding='utf-8'))
+              r = d.get('results', [])
+              print('results.len =', len(r))
+              if not (isinstance(r, list) and len(r) > 0):
+                  print('::error::results[] is empty')
+                  sys.exit(3)
+              PY
+            "
 
       - name: Post-run diagnostics (always)
         if: always()
@@ -490,7 +487,7 @@ jobs:
 
       - name: Validate results.json is NON-empty
         id: validate
-        if: steps.assess.outcome == 'success'
+        if: always() && steps.assess.outcome != 'skipped'
         run: |
           set -euo pipefail
           test -s output/results.json
