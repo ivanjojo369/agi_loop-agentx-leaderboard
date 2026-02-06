@@ -413,12 +413,7 @@ jobs:
               set -euo pipefail
 
               echo '=== Using /app/scenario.toml (forced) ==='
-              python - <<'PY'
-              import hashlib, pathlib
-              p = pathlib.Path('/app/scenario.toml')
-              b = p.read_bytes()
-              print('sha256', hashlib.sha256(b).hexdigest())
-              PY
+              python -c 'import hashlib, pathlib; p=pathlib.Path("/app/scenario.toml"); b=p.read_bytes(); print("sha256", hashlib.sha256(b).hexdigest())'
 
               echo '=== First 260 lines of /app/scenario.toml ==='
               sed -n '1,260p' /app/scenario.toml
@@ -433,19 +428,7 @@ jobs:
 
               python -m agentbeats.client_cli /app/scenario.toml /app/output/results.json
 
-              python - <<'PY'
-              import json, pathlib, sys
-              p = pathlib.Path('/app/output/results.json')
-              if not (p.exists() and p.stat().st_size > 0):
-                  print('::error::results.json missing/empty')
-                  sys.exit(2)
-              d = json.loads(p.read_text(encoding='utf-8'))
-              r = d.get('results', [])
-              print('results.len =', len(r))
-              if not (isinstance(r, list) and len(r) > 0):
-                  print('::error::results[] is empty')
-                  sys.exit(3)
-              PY
+              python -c 'import json, pathlib, sys; p=pathlib.Path("/app/output/results.json"); missing=not(p.exists() and p.stat().st_size>0); print("results.json exists=", (not missing)); sys.exit(2) if missing else None; d=json.loads(p.read_text(encoding="utf-8")); r=d.get("results", []); print("results.len =", len(r)); sys.exit(3) if not(isinstance(r,list) and len(r)>0) else None'
             "
 
       - name: Post-run diagnostics (always)
@@ -487,21 +470,12 @@ jobs:
 
       - name: Validate results.json is NON-empty
         id: validate
-        if: always() && steps.assess.outcome != 'skipped'
+        if: steps.assess.outcome == 'success'
         run: |
           set -euo pipefail
           test -s output/results.json
 
-          python - <<'PY'
-          import json, pathlib, sys
-          p = pathlib.Path("output/results.json")
-          d = json.loads(p.read_text(encoding="utf-8"))
-          r = d.get("results")
-          if not (isinstance(r, list) and len(r) > 0):
-              print("::error::results.json has no results[]")
-              sys.exit(2)
-          print("OK results_count =", len(r))
-          PY
+          python -c 'import json, pathlib, sys; p=pathlib.Path("output/results.json"); d=json.loads(p.read_text(encoding="utf-8")); r=d.get("results"); ok=isinstance(r,list) and len(r)>0; print("OK results_count =", len(r)) if ok else print("::error::results.json has no results[]"); sys.exit(0) if ok else sys.exit(2)'
 
       - name: Generate submission metadata
         id: metadata
