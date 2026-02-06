@@ -424,6 +424,7 @@ jobs:
            sed -n "1,260p" /app/scenario.toml
 
            export PYTHONPATH=/app/src
+           uv pip install --system httpx
            python -m agentbeats.client_cli /app/scenario.toml /app/output/results.json
          '
 
