@@ -475,7 +475,7 @@ jobs:
           set -euo pipefail
           test -s output/results.json
 
-          python -c 'import json, pathlib, sys; p=pathlib.Path("output/results.json"); d=json.loads(p.read_text(encoding="utf-8")); r=d.get("results"); ok=isinstance(r,list) and len(r)>0; print("OK results_count =", len(r)) if ok else print("::error::results.json has no results[]"); sys.exit(0) if ok else sys.exit(2)'
+          python -c 'import json, pathlib; p=pathlib.Path("/app/output/results.json"); assert p.exists() and p.stat().st_size>0, "results.json missing/empty"; d=json.loads(p.read_text(encoding="utf-8")); r=d.get("results", []); print("results.len =", len(r)); assert isinstance(r, list) and len(r)>0, "results[] is empty"'
 
       - name: Generate submission metadata
         id: metadata
