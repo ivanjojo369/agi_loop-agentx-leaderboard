@@ -409,11 +409,23 @@ jobs:
 
       - name: Run assessment (agentbeats-client)
         id: assess
+        shell: bash
         run: |
-          export MSYS_NO_PATHCONV=1
-          set -euo pipefail
-          rm -f output/results.json || true
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps agentbeats-client /app/scenario.toml /app/output/results.json
+         export MSYS_NO_PATHCONV=1
+         set -euo pipefail
+         rm -f output/results.json || true
+
+         docker compose --ansi never -f docker-compose.yml run --rm --no-deps \
+         --entrypoint sh agentbeats-client -lc '
+           set -euo pipefail
+           echo "=== Using /app/scenario.toml (forced) ==="
+           python -c "import hashlib,pathlib; p=pathlib.Path(\"/app/scenario.toml\"); b=p.read_bytes(); print(\"sha256\", hashlib.sha256(b).hexdigest()); print(b[:200].decode(\"utf-8\", \"replace\"))"
+           echo "=== First 260 lines of /app/scenario.toml ==="
+           sed -n "1,260p" /app/scenario.toml
+
+           export PYTHONPATH=/app/src
+           python -m agentbeats.client_cli /app/scenario.toml /app/output/results.json
+         '
 
       - name: Post-run diagnostics (always)
         if: always()
