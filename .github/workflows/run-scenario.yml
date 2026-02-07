@@ -439,6 +439,7 @@ jobs:
           python -m ensurepip --upgrade || true
           python -m pip install -q --upgrade pip wheel setuptools
           python -c "import httpx" 2>/dev/null || python -m pip install -q httpx
+          python -c "import a2a" 2>/dev/null || python -m pip install -q a2a-sdk
 
           python -m agentbeats.client_cli /app/scenario.toml /app/output/results.json
 
