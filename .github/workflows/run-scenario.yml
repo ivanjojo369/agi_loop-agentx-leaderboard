@@ -118,18 +118,16 @@ jobs:
           docker context ls || true
           docker context show || true
 
-          echo "=== docker engine connectivity (retry up to ~60s) ==="
-          # Prefer Docker Desktop (Linux engine) context on Windows if available.
-          if ! docker version >/dev/null 2>&1; then
-            if docker context ls 2>/dev/null | grep -qE '(^|[[:space:]])desktop-linux([[:space:]]|$)'; then
-              echo "Switching docker context to desktop-linux"
-              docker context use desktop-linux || true
-            fi
-          fi
-
+          echo "=== docker engine connectivity (retry up to ~60s; try desktop-linux on Windows) ==="
           ok=0
           for i in $(seq 1 30); do
             if docker version && docker info; then ok=1; break; fi
+
+            # Fallback: on Windows Docker Desktop, context may need to be desktop-linux
+            if docker context ls 2>/dev/null | grep -q "^desktop-linux"; then
+              docker context use desktop-linux || true
+            fi
+
             sleep 2
           done
           test "$ok" = "1" || { echo "::error::Docker engine not reachable from runner user"; exit 1; }
@@ -172,37 +170,55 @@ jobs:
           a2a_port = os.environ.get("A2A_PORT","9009").strip()
 
           data = tomllib.loads(scenario_path.read_text(encoding="utf-8"))
-          green = data.get("green_agent") or {}
+          green_block = data.get("green") if isinstance(data.get("green"), dict) else {}
+          green_agent_block = data.get("green_agent") if isinstance(data.get("green_agent"), dict) else {}
           participants = data.get("participants") or []
           config = data.get("config") or {}
 
-          def q(s: str) -> str:
-              return json.dumps(str(s))
+          def q(x) -> str:
+              return json.dumps(str(x))
+
+          green_ep = f"http://green-agent:{a2a_port}"
+          green_id = green_block.get("agentbeats_id") or green_agent_block.get("agentbeats_id")
 
           out = []
           out.append("# Auto-generated A2A scenario for agentbeats-client")
           out.append(f"# Source: {scenario_path}")
           out.append("")
+
+          # Provide BOTH schemas for compatibility with different agentbeats-client versions
           out.append("[green]")
-          out.append(f"endpoint = {q(f'http://green-agent:{a2a_port}')}")
-          gid = green.get("agentbeats_id")
-          if gid:
-              out.append(f"agentbeats_id = {q(gid)}")
+          out.append(f"endpoint = {q(green_ep)}")
+          if green_id:
+              out.append(f"agentbeats_id = {q(green_id)}")
           out.append("")
-          # Compatibility: some agentbeats-client versions expect [green_agent] instead of [green]
+
           out.append("[green_agent]")
-          out.append(f"endpoint = {q(f'http://green-agent:{a2a_port}')}")
-          if gid:
-              out.append(f"agentbeats_id = {q(gid)}")
+          out.append(f"endpoint = {q(green_ep)}")
+          if green_id:
+              out.append(f"agentbeats_id = {q(green_id)}")
           out.append("")
+
+          # Some workflow validations (and some clients) require green to appear in participants too
+          out.append("[[participants]]")
+          out.append('name = "green"')
+          out.append('role = "green"')
+          out.append(f"endpoint = {q(green_ep)}")
+          if green_id:
+              out.append(f"agentbeats_id = {q(green_id)}")
+          out.append("")
+
           for p in participants:
               if not isinstance(p, dict):
                   continue
               name = p.get("name")
               if not name:
                   continue
+              if name == "green":
+                  continue
               out.append("[[participants]]")
               out.append(f"name = {q(name)}")
+              # IMPORTANT: set role even if source scenario doesn't have it (prevents empty results)
               role = p.get("role") or name
               out.append(f"role = {q(role)}")
               out.append(f"endpoint = {q(f'http://{name}:{a2a_port}')}")
@@ -212,7 +228,6 @@ jobs:
               out.append("")
 
           out.append("[config]")
-          # Keep any config fields present, but ensure domain/num_tasks exist if you rely on leaderboard defaults.
           for k in sorted(config.keys()):
               v = config[k]
               if isinstance(v, bool):
@@ -227,14 +242,11 @@ jobs:
           Path("output").mkdir(exist_ok=True)
           Path("output/a2a-scenario.toml").write_text("\n".join(out), encoding="utf-8")
 
-          txt = Path("a2a-scenario.toml").read_text(encoding="utf-8")
-          if "[green]" not in txt or "endpoint" not in txt:
-              raise SystemExit("Generated a2a-scenario.toml missing [green]/endpoint")
           print("Wrote a2a-scenario.toml")
           PY
 
           echo "=== a2a-scenario.toml (head) ==="
-          sed -n '1,180p' a2a-scenario.toml
+          sed -n '1,220p' a2a-scenario.toml
 
       - name: Patch docker-compose.yml (bind absolute scenario/output into agentbeats-client)
         run: |
@@ -306,35 +318,48 @@ jobs:
           green_agent = data.get("green_agent") if isinstance(data.get("green_agent"), dict) else None
           if not green and not green_agent:
               raise SystemExit("A2A TOML missing [green] and [green_agent]")
+
           ge = (green or green_agent).get("endpoint")
           if not isinstance(ge, str) or not ge.strip():
               raise SystemExit("green.endpoint (or green_agent.endpoint) is required in A2A TOML")
-          # If both exist, they must agree (avoid subtle mismatches)
-          if green and green_agent:
-              if green.get("endpoint") != green_agent.get("endpoint"):
-                  raise SystemExit("Mismatch: green.endpoint != green_agent.endpoint")
+
+          if green and green_agent and green.get("endpoint") != green_agent.get("endpoint"):
+              raise SystemExit("Mismatch: green.endpoint != green_agent.endpoint")
 
           parts = data.get("participants")
           if not isinstance(parts, list) or len(parts) == 0:
               raise SystemExit("participants (array) is required in A2A TOML")
 
-          if not any(isinstance(p, dict) and p.get("name") == "green" for p in parts):
-              raise SystemExit('participants must include name="green" (required by agentbeats-client)')
+          # Require roles so agentbeats-client passes attacker/defender to green (prevents results=[]).
+          required_roles = {"green", "attacker", "defender"}
+          seen_roles = set()
+
+          def check_url(u: str, label: str):
+              pr = urlparse(u)
+              if pr.scheme not in ("http","https") or not pr.netloc:
+                  raise SystemExit(f"Invalid {label} URL: {u}")
+
+          check_url(ge, "green endpoint")
 
           for i, p in enumerate(parts):
               if not isinstance(p, dict):
                   raise SystemExit(f"participants[{i}] must be a table")
+              name = p.get("name")
+              role = p.get("role") or name
               ep = p.get("endpoint")
               if not isinstance(ep, str) or not ep.strip():
                   raise SystemExit(f"participants[{i}].endpoint is required")
+              if not isinstance(role, str) or not role.strip():
+                  raise SystemExit(f"participants[{i}].role is required (set role=name)")
+              check_url(ep, f"participants[{i}].endpoint")
+              seen_roles.add(role)
 
-          for u in [ge, *[p["endpoint"] for p in parts]]:
-              pr = urlparse(u)
-              if pr.scheme not in ("http","https") or not pr.netloc:
-                  raise SystemExit(f"Invalid endpoint URL: {u}")
+          missing = required_roles - seen_roles
+          if missing:
+              raise SystemExit(f"participants must include roles {sorted(required_roles)}; missing {sorted(missing)}")
 
-          print("OK: green.endpoint =", ge)
-          print("OK: participants =", [p["endpoint"] for p in parts])
+          print("OK: green endpoint =", ge)
+          print("OK: roles =", sorted(seen_roles))
           PY
 
       - name: Prepare output folders and .env
@@ -428,28 +453,30 @@ jobs:
             test "$ok" = "1" || { echo "::error::$svc not healthy"; docker logs --tail=200 "$svc" || true; exit 1; }
           done
 
-                    docker compose --ansi never -f docker-compose.yml run --rm --no-deps -T \
-            --entrypoint sh agentbeats-client -s <<'SH'
-          set -eu
-          set -o pipefail 2>/dev/null || true
+          # Run inside the agentbeats-client container; pass script via stdin (avoids quote issues)
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps -T             --entrypoint sh agentbeats-client -s <<'SH'
+          set -euo pipefail
 
           echo "=== Using /app/scenario.toml (forced) ==="
           python - <<'PY'
           import hashlib
           from pathlib import Path
-          p = Path('/app/scenario.toml')
-          print('sha256', hashlib.sha256(p.read_bytes()).hexdigest())
+          p = Path("/app/scenario.toml")
+          b = p.read_bytes()
+          print("sha256", hashlib.sha256(b).hexdigest())
           PY
 
           echo "=== First 260 lines of /app/scenario.toml ==="
-          sed -n "1,260p" /app/scenario.toml
+          sed -n '1,260p' /app/scenario.toml
 
-          export PYTHONPATH="/app/src:${PYTHONPATH:-}"
+          export PYTHONPATH=/app/src:$PYTHONPATH
 
           python -m venv /tmp/ab-venv
           . /tmp/ab-venv/bin/activate
           python -m ensurepip --upgrade || true
           python -m pip install -q --upgrade pip wheel setuptools
+
+          # deps required by client runtime
           python -c "import httpx" 2>/dev/null || python -m pip install -q httpx
           python -c "import a2a" 2>/dev/null || python -m pip install -q a2a-sdk
 
@@ -458,14 +485,14 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
-          p = Path('/app/output/results.json')
+          p = Path("/app/output/results.json")
           missing = not (p.exists() and p.stat().st_size > 0)
-          print('results.json exists=', (not missing))
+          print("results.json exists=", (not missing))
           if missing:
               raise SystemExit(2)
-          d = json.loads(p.read_text(encoding='utf-8'))
-          r = d.get('results', [])
-          print('results.len =', len(r))
+          d = json.loads(p.read_text(encoding="utf-8"))
+          r = d.get("results", [])
+          print("results.len =", len(r))
           if not (isinstance(r, list) and len(r) > 0):
               raise SystemExit(3)
           PY
@@ -515,7 +542,16 @@ jobs:
           set -euo pipefail
           test -s output/results.json
 
-          python -c 'import json, pathlib; p=pathlib.Path("output/results.json"); assert p.exists() and p.stat().st_size>0, "results.json missing/empty"; d=json.loads(p.read_text(encoding="utf-8")); r=d.get("results", []); print("results.len =", len(r)); assert isinstance(r, list) and len(r)>0, "results[] is empty"'
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path("output/results.json")
+          assert p.exists() and p.stat().st_size > 0, "results.json missing/empty"
+          d = json.loads(p.read_text(encoding="utf-8"))
+          r = d.get("results", [])
+          print("results.len =", len(r))
+          assert isinstance(r, list) and len(r) > 0, "results[] is empty"
+          PY
 
       - name: Generate submission metadata
         id: metadata
