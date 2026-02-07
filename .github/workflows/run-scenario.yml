@@ -440,6 +440,31 @@ jobs:
           python -m pip install -q --upgrade pip wheel setuptools
           python -c "import httpx" 2>/dev/null || python -m pip install -q httpx
           python -c "import a2a" 2>/dev/null || python -m pip install -q a2a-sdk
+          # Ensure agentbeats-client TOML parser sees green in [[participants]] (some versions require this)
+          python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          p = Path('/app/scenario.toml')
+          data = tomllib.loads(p.read_text(encoding='utf-8'))
+
+          participants = data.get('participants') or []
+          has_green = any(isinstance(x, dict) and x.get('name') == 'green' for x in participants)
+          green = data.get('green') or {}
+
+          print('TOML keys:', sorted(data.keys()))
+          print('participants:', [x.get('name') for x in participants if isinstance(x, dict)])
+          print('green:', green)
+
+          if (not has_green) and isinstance(green, dict) and green.get('endpoint'):
+              with p.open('a', encoding='utf-8') as f:
+                  f.write('\n[[participants]]\n')
+                  f.write('name = "green"\n')
+                  f.write(f'endpoint = "{green["endpoint"]}"\n')
+                  if green.get('agentbeats_id'):
+                      f.write(f'agentbeats_id = "{green["agentbeats_id"]}"\n')
+              print('Patched scenario.toml: added green to [[participants]]')
+          PY
 
           python -m agentbeats.client_cli /app/scenario.toml /app/output/results.json
 
