@@ -189,6 +189,12 @@ jobs:
           if gid:
               out.append(f"agentbeats_id = {q(gid)}")
           out.append("")
+          # Compatibility: some agentbeats-client versions expect [green_agent] instead of [green]
+          out.append("[green_agent]")
+          out.append(f"endpoint = {q(f'http://green-agent:{a2a_port}')}")
+          if gid:
+              out.append(f"agentbeats_id = {q(gid)}")
+          out.append("")
           # Some agentbeats-client versions expect green as a [[participants]] entry too.
           out.append("[[participants]]")
           out.append(f"name = {q('green')}")
@@ -295,7 +301,7 @@ jobs:
           echo "=== docker-compose.yml (head after patch) ==="
           sed -n '1,260p' docker-compose.yml
 
-      - name: Strict validate A2A TOML (green.endpoint + participants endpoints)
+      - name: Strict validate A2A TOML (green_agent.endpoint/green.endpoint + participants endpoints)
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -306,12 +312,17 @@ jobs:
           a2a = Path("a2a-scenario.toml")
           data = tomllib.loads(a2a.read_text(encoding="utf-8"))
 
-          green = data.get("green")
-          if not isinstance(green, dict):
-              raise SystemExit("A2A TOML missing [green]")
-          ge = green.get("endpoint")
+          green = data.get("green") if isinstance(data.get("green"), dict) else None
+          green_agent = data.get("green_agent") if isinstance(data.get("green_agent"), dict) else None
+          if not green and not green_agent:
+              raise SystemExit("A2A TOML missing [green] and [green_agent]")
+          ge = (green or green_agent).get("endpoint")
           if not isinstance(ge, str) or not ge.strip():
-              raise SystemExit("green.endpoint is required in A2A TOML")
+              raise SystemExit("green.endpoint (or green_agent.endpoint) is required in A2A TOML")
+          # If both exist, they must agree (avoid subtle mismatches)
+          if green and green_agent:
+              if green.get("endpoint") != green_agent.get("endpoint"):
+                  raise SystemExit("Mismatch: green.endpoint != green_agent.endpoint")
 
           parts = data.get("participants")
           if not isinstance(parts, list) or len(parts) == 0:
