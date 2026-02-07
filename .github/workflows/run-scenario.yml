@@ -195,15 +195,6 @@ jobs:
           if gid:
               out.append(f"agentbeats_id = {q(gid)}")
           out.append("")
-          # Some agentbeats-client versions expect green as a [[participants]] entry too.
-          out.append("[[participants]]")
-          out.append(f"name = {q('green')}")
-          out.append(f"role = {q('green')}")
-          out.append(f"endpoint = {q(f'http://green-agent:{a2a_port}')}")
-          if gid:
-              out.append(f"agentbeats_id = {q(gid)}")
-          out.append("")
-
           for p in participants:
               if not isinstance(p, dict):
                   continue
@@ -212,9 +203,8 @@ jobs:
                   continue
               out.append("[[participants]]")
               out.append(f"name = {q(name)}")
-              role = p.get("role")
-              if role:
-                  out.append(f"role = {q(role)}")
+              role = p.get("role") or name
+              out.append(f"role = {q(role)}")
               out.append(f"endpoint = {q(f'http://{name}:{a2a_port}')}")
               pid = p.get("agentbeats_id")
               if pid:
