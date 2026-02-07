@@ -469,7 +469,7 @@ jobs:
           echo "=== First 260 lines of /app/scenario.toml ==="
           sed -n '1,260p' /app/scenario.toml
 
-          export PYTHONPATH=/app/src:$PYTHONPATH
+          export PYTHONPATH="/app/src:${PYTHONPATH:-}"
 
           python -m venv /tmp/ab-venv
           . /tmp/ab-venv/bin/activate
