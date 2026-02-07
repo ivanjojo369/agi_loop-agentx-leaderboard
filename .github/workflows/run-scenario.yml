@@ -409,27 +409,29 @@ jobs:
           done
 
           docker compose --ansi never -f docker-compose.yml run --rm --no-deps -T \
-            --entrypoint sh agentbeats-client -lc "
+            --entrypoint sh agentbeats-client -lc docker compose --ansi never -f docker-compose.yml run --rm --no-deps -T \
+            --entrypoint sh agentbeats-client -lc '
               set -euo pipefail
 
-              echo '=== Using /app/scenario.toml (forced) ==='
-              python -c 'import hashlib, pathlib; p=pathlib.Path("/app/scenario.toml"); b=p.read_bytes(); print("sha256", hashlib.sha256(b).hexdigest())'
+              echo "=== Using /app/scenario.toml (forced) ==="
+              python -c "import hashlib, pathlib; p=pathlib.Path(\"/app/scenario.toml\"); b=p.read_bytes(); print(\"sha256\", hashlib.sha256(b).hexdigest())"
 
-              echo '=== First 260 lines of /app/scenario.toml ==='
-              sed -n '1,260p' /app/scenario.toml
+              echo "=== First 260 lines of /app/scenario.toml ==="
+              sed -n "1,260p" /app/scenario.toml
 
-              export PYTHONPATH=/app/src:\$PYTHONPATH
+              export PYTHONPATH=/app/src:$PYTHONPATH
 
               python -m venv /tmp/ab-venv
               . /tmp/ab-venv/bin/activate
               python -m ensurepip --upgrade || true
               python -m pip install -q --upgrade pip wheel setuptools
-              python -c 'import httpx' 2>/dev/null || python -m pip install -q httpx
+              python -c "import httpx" 2>/dev/null || python -m pip install -q httpx
 
               python -m agentbeats.client_cli /app/scenario.toml /app/output/results.json
 
-              python -c 'import json, pathlib, sys; p=pathlib.Path("/app/output/results.json"); missing=not(p.exists() and p.stat().st_size>0); print("results.json exists=", (not missing)); sys.exit(2) if missing else None; d=json.loads(p.read_text(encoding="utf-8")); r=d.get("results", []); print("results.len =", len(r)); sys.exit(3) if not(isinstance(r,list) and len(r)>0) else None'
-            "
+              python -c "import json, pathlib, sys; p=pathlib.Path(\"/app/output/results.json\"); missing=not(p.exists() and p.stat().st_size>0); print(\"results.json exists=\", (not missing)); sys.exit(2) if missing else None; d=json.loads(p.read_text(encoding=\"utf-8\")); r=d.get(\"results\", []); print(\"results.len =\", len(r)); sys.exit(3) if not(isinstance(r,list) and len(r)>0) else None"
+            '
+
 
       - name: Post-run diagnostics (always)
         if: always()
@@ -475,7 +477,7 @@ jobs:
           set -euo pipefail
           test -s output/results.json
 
-          python -c 'import json, pathlib; p=pathlib.Path("/app/output/results.json"); assert p.exists() and p.stat().st_size>0, "results.json missing/empty"; d=json.loads(p.read_text(encoding="utf-8")); r=d.get("results", []); print("results.len =", len(r)); assert isinstance(r, list) and len(r)>0, "results[] is empty"'
+          python -c 'import json, pathlib; p=pathlib.Path("output/results.json"); assert p.exists() and p.stat().st_size>0, "results.json missing/empty"; d=json.loads(p.read_text(encoding="utf-8")); r=d.get("results", []); print("results.len =", len(r)); assert isinstance(r, list) and len(r)>0, "results[] is empty"'
 
       - name: Generate submission metadata
         id: metadata
