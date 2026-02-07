@@ -189,6 +189,14 @@ jobs:
           if gid:
               out.append(f"agentbeats_id = {q(gid)}")
           out.append("")
+          # Some agentbeats-client versions expect green as a [[participants]] entry too.
+          out.append("[[participants]]")
+          out.append(f"name = {q('green')}")
+          out.append(f"role = {q('green')}")
+          out.append(f"endpoint = {q(f'http://green-agent:{a2a_port}')}")
+          if gid:
+              out.append(f"agentbeats_id = {q(gid)}")
+          out.append("")
 
           for p in participants:
               if not isinstance(p, dict):
@@ -308,6 +316,9 @@ jobs:
           parts = data.get("participants")
           if not isinstance(parts, list) or len(parts) == 0:
               raise SystemExit("participants (array) is required in A2A TOML")
+
+          if not any(isinstance(p, dict) and p.get("name") == "green" for p in parts):
+              raise SystemExit('participants must include name="green" (required by agentbeats-client)')
 
           for i, p in enumerate(parts):
               if not isinstance(p, dict):
@@ -440,31 +451,6 @@ jobs:
           python -m pip install -q --upgrade pip wheel setuptools
           python -c "import httpx" 2>/dev/null || python -m pip install -q httpx
           python -c "import a2a" 2>/dev/null || python -m pip install -q a2a-sdk
-          # Ensure agentbeats-client TOML parser sees green in [[participants]] (some versions require this)
-          python - <<'PY'
-          import tomllib
-          from pathlib import Path
-
-          p = Path('/app/scenario.toml')
-          data = tomllib.loads(p.read_text(encoding='utf-8'))
-
-          participants = data.get('participants') or []
-          has_green = any(isinstance(x, dict) and x.get('name') == 'green' for x in participants)
-          green = data.get('green') or {}
-
-          print('TOML keys:', sorted(data.keys()))
-          print('participants:', [x.get('name') for x in participants if isinstance(x, dict)])
-          print('green:', green)
-
-          if (not has_green) and isinstance(green, dict) and green.get('endpoint'):
-              with p.open('a', encoding='utf-8') as f:
-                  f.write('\n[[participants]]\n')
-                  f.write('name = "green"\n')
-                  f.write(f'endpoint = "{green["endpoint"]}"\n')
-                  if green.get('agentbeats_id'):
-                      f.write(f'agentbeats_id = "{green["agentbeats_id"]}"\n')
-              print('Patched scenario.toml: added green to [[participants]]')
-          PY
 
           python -m agentbeats.client_cli /app/scenario.toml /app/output/results.json
 
