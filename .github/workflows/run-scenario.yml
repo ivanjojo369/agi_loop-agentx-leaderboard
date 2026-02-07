@@ -531,3 +531,4 @@ jobs:
             exit 0
           }
           docker compose --ansi never -f docker-compose.yml down -v
+
