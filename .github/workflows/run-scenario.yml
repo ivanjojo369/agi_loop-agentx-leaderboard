@@ -605,5 +605,6 @@ jobs:
           if (-not $docker) {
             Write-Host "docker not found; skipping cleanup."
             exit 0
+            
           }
           docker compose --ansi never -f docker-compose.yml down -v
