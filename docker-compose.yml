@@ -1,0 +1,77 @@
+# Auto-generated from scenario.toml
+
+services:
+  green-agent:
+    image: ghcr.io/ivanjojo369/agi_loop-agentx:phase1-2026-01-31-a2a-A3
+    platform: linux/amd64
+    container_name: green-agent
+    command: ["--host", "0.0.0.0", "--port", "9009", "--card-url", "http://green-agent:9009"]
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9009/.well-known/agent-card.json"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      attacker:
+        condition: service_healthy
+      defender:
+        condition: service_healthy
+    networks:
+      - agent-network
+
+  attacker:
+    image: ghcr.io/ivanjojo369/agi_loop-agentx:phase1-2026-01-31-a2a-A1
+    platform: linux/amd64
+    container_name: attacker
+    command: ["--host", "0.0.0.0", "--port", "9009", "--card-url", "http://attacker:9009"]
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9009/.well-known/agent-card.json"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - agent-network
+
+  defender:
+    image: ghcr.io/ivanjojo369/agi_loop-agentx:phase1-2026-01-31-a2a-A2
+    platform: linux/amd64
+    container_name: defender
+    command: ["--host", "0.0.0.0", "--port", "9009", "--card-url", "http://defender:9009"]
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9009/.well-known/agent-card.json"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - agent-network
+
+  agentbeats-client:
+    image: ghcr.io/agentbeats/agentbeats-client:v1.0.0
+    platform: linux/amd64
+    container_name: agentbeats-client
+    volumes:
+      - ./a2a-scenario.toml:/app/scenario.toml
+      - ./output:/app/output
+    command: ["/app/scenario.toml", "/app/output/results.json"]
+    depends_on:
+      green-agent:
+        condition: service_healthy
+      attacker:
+        condition: service_healthy
+      defender:
+        condition: service_healthy
+    networks:
+      - agent-network
+
+networks:
+  agent-network:
+    driver: bridge
