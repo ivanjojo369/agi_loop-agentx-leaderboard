@@ -608,3 +608,4 @@ jobs:
             
           }
           docker compose --ansi never -f docker-compose.yml down -v
+
