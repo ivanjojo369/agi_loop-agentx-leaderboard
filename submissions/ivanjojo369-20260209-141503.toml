@@ -1,0 +1,35 @@
+# AgentBeats Purple/Green Scenario (Phase 1)
+# Este archivo es intencionalmente "A2A-friendly":
+# - Conserva el formato clásico del leaderboard ([green_agent], [[participants]], [config]) usado por generate_compose.py
+# - Y además incluye [green] + endpoint para que agentbeats-client pueda leer green.endpoint directo
+#
+# IMPORTANTE: No pegues llaves aquí. Usa GitHub Actions Secrets (.env / secrets) como ya lo haces.
+
+# ---------- A2A / agentbeats-client (esto evita: green.endpoint is required) ----------
+[green]
+endpoint = "http://green-agent:9009"
+agentbeats_id = "019bdcd0-041c-7d23-a7ef-2470d62afdeb"
+
+# ---------- Leaderboard / compose generator compatibility ----------
+[green_agent]
+agentbeats_id = "019bdcd0-041c-7d23-a7ef-2470d62afdeb"
+env = { OPENAI_API_KEY = "${OPENAI_API_KEY}" }
+
+[[participants]]
+name = "attacker"
+endpoint = "http://attacker:9009"
+agentbeats_id = "019bfc07-c82f-7fe2-8302-0ed656298c79"
+env = { OPENAI_API_KEY = "${OPENAI_API_KEY}" }
+
+[[participants]]
+name = "defender"
+endpoint = "http://defender:9009"
+agentbeats_id = "019c1163-b141-7131-9769-08300b1c1511"
+env = { OPENAI_API_KEY = "${OPENAI_API_KEY}" }
+
+[config]
+scenario_set = "security_arena_phase1"
+domain = "security_arena"
+num_tasks = 3
+max_rounds = 15
+seed = 1
