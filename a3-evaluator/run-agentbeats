@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+import os, sys
+os.chdir("/app")
+sys.path.insert(0, "/app")
+
+import os, shlex, argparse
+
+def main():
+    args_str = os.getenv("ARGS", "")
+    argv = shlex.split(args_str)
+
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument("--port", type=int, default=int(os.getenv("PORT", "9009")))
+    p.add_argument("--card-url", default=os.getenv("CARD_URL", ""))
+
+    ns, _ = p.parse_known_args(argv)
+
+    os.environ["PORT"] = str(ns.port)
+    if ns.card_url:
+        os.environ["CARD_URL"] = ns.card_url.rstrip("/")
+
+    # Arranca uvicorn (misma semántica de tu compose: host/port vienen de ARGS)
+    import uvicorn
+    uvicorn.run("app.server:app", host=ns.host, port=ns.port)
+
+if __name__ == "__main__":
+    main()
