@@ -392,10 +392,12 @@ jobs:
           docker compose --ansi never -f docker-compose.yml config > compose.resolved.yml || true
 
           echo "=== /app/scenario.toml (first 240 lines) inside agentbeats-client ==="
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc             "set -eux; test -s /app/scenario.toml; sed -n '1,240p' /app/scenario.toml"
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint sh agentbeats-client -lc \
+            "set -eux; test -s /app/scenario.toml; sed -n '1,240p' /app/scenario.toml"
 
           echo "=== Validate /app/scenario.toml keys (tomllib) inside agentbeats-client ==="
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint python agentbeats-client -c             "import tomllib, pathlib; d=tomllib.loads(pathlib.Path('/app/scenario.toml').read_text()); g=d.get('green'); assert isinstance(g, dict) and g.get('endpoint'), 'missing green.endpoint'; parts=d.get('participants'); assert isinstance(parts, list) and len(parts)>0, 'missing participants'; print('OK green.endpoint =', g['endpoint']); print('OK participants =', [p.get('endpoint') for p in parts])"
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps --entrypoint python agentbeats-client -c \
+            "import tomllib, pathlib; d=tomllib.loads(pathlib.Path('/app/scenario.toml').read_text()); g=d.get('green'); assert isinstance(g, dict) and g.get('endpoint'), 'missing green.endpoint'; parts=d.get('participants'); assert isinstance(parts, list) and len(parts)>0, 'missing participants'; print('OK green.endpoint =', g['endpoint']); print('OK participants =', [p.get('endpoint') for p in parts])"
 
       - name: Pull images
         run: |
@@ -454,7 +456,8 @@ jobs:
           done
 
           # Run inside the agentbeats-client container; pass script via stdin (avoids quote issues)
-          docker compose --ansi never -f docker-compose.yml run --rm --no-deps -T             --entrypoint sh agentbeats-client -s <<'SH'
+          docker compose --ansi never -f docker-compose.yml run --rm --no-deps -T \
+            --entrypoint sh agentbeats-client -s <<'SH'
           set -euo pipefail
 
           echo "=== Using /app/scenario.toml (forced) ==="
@@ -574,6 +577,40 @@ jobs:
             cp output/provenance.json "submissions/${{ steps.metadata.outputs.unique_name }}.provenance.json"
           fi
 
+      # ✅ NEW: Workaround for "fatal: detected dubious ownership" on self-hosted Windows runners
+      - name: Fix Git safe.directory (self-hosted runner)
+        if: steps.metadata.outcome == 'success'
+        run: |
+          set -euo pipefail
+          echo "GITHUB_WORKSPACE=${GITHUB_WORKSPACE:-}"
+          repo_pwd="$(pwd)"
+          repo_gw="${GITHUB_WORKSPACE:-}"
+
+          # Try multiple canonical forms (bash path, windows path) to satisfy Git's safety check.
+          candidates=()
+          [ -n "$repo_gw" ] && candidates+=("$repo_gw")
+          candidates+=("$repo_pwd")
+
+          # Git Bash sometimes provides Windows path via pwd -W
+          if repo_pw="$(pwd -W 2>/dev/null)"; then
+            [ -n "${repo_pw:-}" ] && candidates+=("$repo_pw")
+          fi
+
+          # cygpath variants if available
+          if command -v cygpath >/dev/null 2>&1; then
+            candidates+=("$(cygpath -w "$repo_pwd")")
+            candidates+=("$(cygpath -m "$repo_pwd")")
+          fi
+
+          for p in "${candidates[@]}"; do
+            [ -n "${p:-}" ] || continue
+            echo "Adding safe.directory: $p"
+            git config --global --add safe.directory "$p" || true
+          done
+
+          echo "=== safe.directory entries ==="
+          git config --global --get-all safe.directory || true
+
       - name: Create submission branch from origin/main
         if: steps.metadata.outcome == 'success'
         run: |
@@ -605,7 +642,6 @@ jobs:
           if (-not $docker) {
             Write-Host "docker not found; skipping cleanup."
             exit 0
-            
+
           }
           docker compose --ansi never -f docker-compose.yml down -v
-
